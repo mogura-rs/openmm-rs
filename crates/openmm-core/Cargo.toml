@@ -1,0 +1,22 @@
+[package]
+name = "openmm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["ndarray"]
+ndarray = ["burn/ndarray"]
+wgpu    = ["burn/wgpu"]
+cuda    = ["burn/cuda"]
+
+[dependencies]
+burn.workspace = true
+nalgebra.workspace = true
+rayon.workspace = true
+uom.workspace = true
+# mdtraj-rs.workspace = true  # uncomment when file I/O module is implemented
+rustfft = "6"
+
+[dev-dependencies]
+approx.workspace = true

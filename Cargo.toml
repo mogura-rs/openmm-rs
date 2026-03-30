@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "crates/openmm-core",
+    "crates/openmm-py",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+burn = { version = "0.20.1" }
+nalgebra = "0.34.2"
+rayon = "1.10"
+uom = { version = "0.38", features = ["f64", "si"] }
+mdtraj-rs = { git = "https://github.com/mogura-rs/mdtraj-rs" }
+approx = "0.5"
+pyo3 = { version = "0.28.2", features = ["extension-module"] }

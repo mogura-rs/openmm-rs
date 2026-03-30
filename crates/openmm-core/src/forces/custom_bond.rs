@@ -1,0 +1,357 @@
+// CustomBondForce: user-defined energy as a function of bond distance r.
+// Energy expression may reference r and per-bond parameters.
+// Reference test: openmm/tests/TestCustomBondForce.h
+use super::Force;
+use crate::expression::Expression;
+use crate::forces::harmonic_bond::apply_minimum_image_ortho;
+use burn::prelude::*;
+use std::collections::HashMap;
+
+#[derive(Clone)]
+pub struct CustomBondForce {
+    /// Energy expression as a function of r and per-bond params.
+    energy_expr: Expression,
+    /// Names of per-bond parameters, in order.
+    per_bond_params: Vec<String>,
+    bonds: Vec<BondRecord>,
+    global_param_names: Vec<String>,
+    global_params: HashMap<String, f64>,
+    energy_param_deriv_names: Vec<String>,
+    use_pbc: bool,
+}
+
+#[derive(Clone)]
+struct BondRecord {
+    p1: usize,
+    p2: usize,
+    params: Vec<f64>,
+}
+
+impl CustomBondForce {
+    pub fn new(energy: &str) -> Result<Self, crate::expression::ParseError> {
+        let expr = Expression::parse(energy)?;
+        Ok(Self {
+            energy_expr: expr,
+            per_bond_params: Vec::new(),
+            bonds: Vec::new(),
+            global_param_names: Vec::new(),
+            global_params: HashMap::new(),
+            energy_param_deriv_names: Vec::new(),
+            use_pbc: false,
+        })
+    }
+
+    /// Declare a per-bond parameter by name. Returns parameter index.
+    pub fn add_per_bond_parameter(&mut self, name: &str) -> usize {
+        self.per_bond_params.push(name.to_string());
+        self.per_bond_params.len() - 1
+    }
+
+    pub fn num_per_bond_parameters(&self) -> usize {
+        self.per_bond_params.len()
+    }
+
+    pub fn per_bond_parameter_name(&self, index: usize) -> &str {
+        &self.per_bond_params[index]
+    }
+
+    /// Add a global (constant) parameter.
+    pub fn add_global_parameter(&mut self, name: &str, value: f64) {
+        if !self.global_params.contains_key(name) {
+            self.global_param_names.push(name.to_string());
+        }
+        self.global_params.insert(name.to_string(), value);
+    }
+
+    pub fn num_global_parameters(&self) -> usize {
+        self.global_param_names.len()
+    }
+
+    pub fn global_parameter_name(&self, index: usize) -> &str {
+        &self.global_param_names[index]
+    }
+
+    pub fn global_parameter_default_value(&self, index: usize) -> f64 {
+        let name = &self.global_param_names[index];
+        self.global_params[name]
+    }
+
+    pub fn set_global_parameter_default_value(&mut self, index: usize, value: f64) {
+        let name = self.global_param_names[index].clone();
+        *self
+            .global_params
+            .get_mut(&name)
+            .expect("unknown global parameter") = value;
+    }
+
+    pub fn add_energy_parameter_derivative(&mut self, name: &str) {
+        assert!(
+            self.global_params.contains_key(name),
+            "unknown global parameter"
+        );
+        if !self
+            .energy_param_deriv_names
+            .iter()
+            .any(|existing| existing == name)
+        {
+            self.energy_param_deriv_names.push(name.to_string());
+        }
+    }
+
+    pub fn num_energy_parameter_derivatives(&self) -> usize {
+        self.energy_param_deriv_names.len()
+    }
+
+    pub fn energy_parameter_derivative_name(&self, index: usize) -> &str {
+        &self.energy_param_deriv_names[index]
+    }
+
+    pub fn set_global_parameter_value(&mut self, name: &str, value: f64) {
+        *self
+            .global_params
+            .get_mut(name)
+            .expect("unknown global parameter") = value;
+    }
+
+    /// Add a bond. `params` must match the declared per-bond parameters.
+    pub fn add_bond(&mut self, p1: usize, p2: usize, params: Vec<f64>) -> usize {
+        assert_eq!(params.len(), self.per_bond_params.len());
+        self.bonds.push(BondRecord { p1, p2, params });
+        self.bonds.len() - 1
+    }
+
+    pub fn bond_parameters(&self, index: usize) -> (usize, usize, &[f64]) {
+        let bond = &self.bonds[index];
+        (bond.p1, bond.p2, &bond.params)
+    }
+
+    pub fn set_bond_parameters(&mut self, index: usize, p1: usize, p2: usize, params: Vec<f64>) {
+        assert_eq!(params.len(), self.per_bond_params.len());
+        let b = &mut self.bonds[index];
+        b.p1 = p1;
+        b.p2 = p2;
+        b.params = params;
+    }
+
+    pub fn num_bonds(&self) -> usize {
+        self.bonds.len()
+    }
+
+    pub fn set_uses_periodic_boundary_conditions(&mut self, use_pbc: bool) {
+        self.use_pbc = use_pbc;
+    }
+
+    pub fn uses_periodic_boundary_conditions(&self) -> bool {
+        self.use_pbc
+    }
+
+    pub fn update_parameters_from(&mut self, source: &Self) {
+        assert_eq!(
+            self.per_bond_params, source.per_bond_params,
+            "per-bond parameter definitions must match"
+        );
+        assert_eq!(
+            self.bonds.len(),
+            source.bonds.len(),
+            "bond count must match"
+        );
+        self.bonds = source.bonds.clone();
+    }
+}
+
+impl<B: Backend> Force<B> for CustomBondForce {
+    fn calc_forces_and_energy(
+        &self,
+        positions: &Tensor<B, 2>,
+        box_vectors: Option<&[[f64; 3]; 3]>,
+    ) -> (Tensor<B, 2>, f64) {
+        let device = positions.device();
+        let n = positions.dims()[0];
+        let pos: Vec<f64> = positions
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(|v| v as f64)
+            .collect();
+
+        let mut forces = vec![0.0f64; n * 3];
+        let mut energy = 0.0f64;
+
+        for bond in &self.bonds {
+            let i = bond.p1;
+            let j = bond.p2;
+
+            let mut delta = [
+                pos[j * 3] - pos[i * 3],
+                pos[j * 3 + 1] - pos[i * 3 + 1],
+                pos[j * 3 + 2] - pos[i * 3 + 2],
+            ];
+
+            if self.use_pbc {
+                if let Some(bv) = box_vectors {
+                    apply_minimum_image_ortho(&mut delta, bv);
+                }
+            }
+
+            let r = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+
+            // Build variable map: r + per-bond params + global params.
+            let mut vars: HashMap<&str, f64> = HashMap::new();
+            vars.insert("r", r);
+            for (name, &val) in &self.global_params {
+                vars.insert(name.as_str(), val);
+            }
+            for (name, &val) in self.per_bond_params.iter().zip(&bond.params) {
+                vars.insert(name.as_str(), val);
+            }
+
+            let e = self.energy_expr.compute(&vars).unwrap_or(0.0);
+            energy += e;
+
+            // Numerical derivative dE/dr, then project onto bond direction.
+            let dr = 1e-5_f64;
+            vars.insert("r", r + dr);
+            let e_plus = self.energy_expr.compute(&vars).unwrap_or(0.0);
+            vars.insert("r", r - dr);
+            let e_minus = self.energy_expr.compute(&vars).unwrap_or(0.0);
+            let de_dr = (e_plus - e_minus) / (2.0 * dr);
+
+            let f_over_r = de_dr / r;
+            for d in 0..3 {
+                let f = f_over_r * delta[d];
+                forces[i * 3 + d] += f;
+                forces[j * 3 + d] -= f;
+            }
+        }
+
+        let forces_f32: Vec<f32> = forces.iter().map(|&v| v as f32).collect();
+        let forces_tensor =
+            Tensor::<B, 1>::from_floats(forces_f32.as_slice(), &device).reshape([n, 3]);
+
+        (forces_tensor, energy)
+    }
+
+    fn uses_periodic_boundary_conditions(&self) -> bool {
+        self.use_pbc
+    }
+
+    fn global_parameters(&self) -> HashMap<String, f64> {
+        self.global_params.clone()
+    }
+
+    fn set_global_parameter(&mut self, name: &str, value: f64) -> bool {
+        match self.global_params.get_mut(name) {
+            Some(parameter) => {
+                *parameter = value;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn energy_parameter_derivatives(
+        &self,
+        positions: &Tensor<B, 2>,
+        box_vectors: Option<&[[f64; 3]; 3]>,
+    ) -> HashMap<String, f64> {
+        let mut derivatives = HashMap::new();
+        let step = 1e-6;
+        for name in &self.energy_param_deriv_names {
+            let value = *self
+                .global_params
+                .get(name)
+                .expect("unknown global parameter");
+            let mut plus = self.clone();
+            plus.global_params.insert(name.clone(), value + step);
+            let energy_plus = Force::<B>::calc_forces_and_energy(&plus, positions, box_vectors).1;
+
+            let mut minus = self.clone();
+            minus.global_params.insert(name.clone(), value - step);
+            let energy_minus = Force::<B>::calc_forces_and_energy(&minus, positions, box_vectors).1;
+
+            derivatives.insert(name.clone(), (energy_plus - energy_minus) / (2.0 * step));
+        }
+        derivatives
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    use burn::backend::NdArray;
+
+    type B = NdArray;
+
+    fn pos_tensor(data: &[[f64; 3]]) -> Tensor<B, 2> {
+        let flat: Vec<f32> = data
+            .iter()
+            .flat_map(|p| p.iter().map(|&v| v as f32))
+            .collect();
+        let n = data.len();
+        Tensor::<B, 1>::from_floats(flat.as_slice(), &Default::default()).reshape([n, 3])
+    }
+
+    // CustomBondForce with E=k*(r-r0)^2 should give same result as HarmonicBondForce.
+    #[test]
+    fn test_harmonic_equivalent() {
+        let mut force = CustomBondForce::new("k*(r-r0)^2").unwrap();
+        force.add_per_bond_parameter("r0");
+        force.add_per_bond_parameter("k");
+        force.add_bond(0, 1, vec![1.5, 0.8]);
+
+        let positions = pos_tensor(&[[0.0, 2.0, 0.0], [0.0, 0.0, 0.0]]);
+        let (_, energy) = Force::<B>::calc_forces_and_energy(&force, &positions, None);
+
+        // r=2, r0=1.5, k=0.8 => E = 0.8*(0.5)^2 = 0.2
+        assert_relative_eq!(energy, 0.8 * 0.25, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn test_energy_parameter_derivative_registration() {
+        let mut force = CustomBondForce::new("scale*k*(r-r0)^2").unwrap();
+        force.add_global_parameter("scale", 1.0);
+        force.add_energy_parameter_derivative("scale");
+        force.add_energy_parameter_derivative("scale");
+
+        assert_eq!(force.num_energy_parameter_derivatives(), 1);
+        assert_eq!(force.energy_parameter_derivative_name(0), "scale");
+    }
+
+    #[test]
+    fn test_global_parameter_metadata() {
+        let mut force = CustomBondForce::new("scale*k*(r-r0)^2").unwrap();
+        force.add_global_parameter("scale", 1.0);
+        force.add_global_parameter("bias", 2.0);
+
+        assert_eq!(force.num_global_parameters(), 2);
+        assert_eq!(force.global_parameter_name(0), "scale");
+        assert_eq!(force.global_parameter_name(1), "bias");
+        assert_relative_eq!(
+            force.global_parameter_default_value(1),
+            2.0,
+            epsilon = 1e-12
+        );
+
+        force.set_global_parameter_default_value(0, 3.5);
+        assert_relative_eq!(
+            force.global_parameter_default_value(0),
+            3.5,
+            epsilon = 1e-12
+        );
+    }
+
+    #[test]
+    fn test_per_bond_metadata() {
+        let mut force = CustomBondForce::new("k*(r-r0)^2").unwrap();
+        force.add_per_bond_parameter("r0");
+        force.add_per_bond_parameter("k");
+        force.add_bond(0, 1, vec![1.0, 2.0]);
+
+        assert_eq!(force.num_per_bond_parameters(), 2);
+        assert_eq!(force.per_bond_parameter_name(0), "r0");
+        assert_eq!(force.per_bond_parameter_name(1), "k");
+        assert_eq!(force.num_bonds(), 1);
+    }
+}

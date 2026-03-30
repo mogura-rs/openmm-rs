@@ -1,0 +1,17 @@
+[package]
+name = "openmm-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "openmm"
+crate-type = ["cdylib"]
+
+[dependencies]
+openmm-core = { path = "../openmm-core", features = ["ndarray"] }
+pyo3.workspace = true
+burn = { workspace = true, features = ["ndarray"] }
+
+[build-dependencies]
+pyo3-build-config = "0.28.2"

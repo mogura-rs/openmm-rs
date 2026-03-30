@@ -1,0 +1,922 @@
+// Context owns the mutable simulation state and drives the MD loop.
+// Generic over burn Backend: NdArray (CPU), Wgpu (GPU), Cuda.
+use burn::prelude::*;
+
+use crate::forces::custom_angle::CustomAngleForce;
+use crate::forces::custom_bond::CustomBondForce;
+use crate::forces::custom_external::CustomExternalForce;
+use crate::forces::custom_nonbonded::CustomNonbondedForce;
+use crate::forces::custom_torsion::CustomTorsionForce;
+use crate::forces::harmonic_angle::HarmonicAngleForce;
+use crate::forces::harmonic_bond::HarmonicBondForce;
+use crate::forces::nonbonded::NonbondedForce;
+use crate::forces::periodic_torsion::PeriodicTorsionForce;
+use crate::forces::rb_torsion::RBTorsionForce;
+use crate::integrators::langevin::BOLTZMANN;
+use crate::integrators::Integrator;
+use crate::state::{State, StateFlags};
+use crate::system::{validate_box_vectors, System};
+use crate::units::BoxVectors;
+use std::collections::HashMap;
+
+pub struct Context<B: Backend> {
+    system: System<B>,
+    integrator: Box<dyn Integrator<B>>,
+    positions: Tensor<B, 2>,  // [N, 3] nm
+    velocities: Tensor<B, 2>, // [N, 3] nm/ps
+    periodic_box_vectors: Option<BoxVectors>,
+    parameters: HashMap<String, f64>,
+    time: f64,
+    step_count: u64,
+    device: B::Device,
+}
+
+impl<B: Backend<FloatElem = f32>> Context<B> {
+    pub fn new(system: System<B>, integrator: Box<dyn Integrator<B>>, device: B::Device) -> Self {
+        let n = system.num_particles();
+        let periodic_box_vectors = system.default_periodic_box_vectors().copied();
+        let mut parameters = HashMap::new();
+        for force in system.forces() {
+            for (name, value) in force.global_parameters() {
+                if let Some(previous) = parameters.insert(name.clone(), value) {
+                    assert!(
+                        previous == value,
+                        "global parameter '{name}' has conflicting default values"
+                    );
+                }
+            }
+        }
+        let positions = Tensor::zeros([n, 3], &device);
+        let velocities = Tensor::zeros([n, 3], &device);
+        Self {
+            system,
+            integrator,
+            positions,
+            velocities,
+            periodic_box_vectors,
+            parameters,
+            time: 0.0,
+            step_count: 0,
+            device,
+        }
+    }
+
+    pub fn set_positions(&mut self, pos: Tensor<B, 2>) {
+        self.positions = pos;
+    }
+
+    pub fn set_velocities(&mut self, vel: Tensor<B, 2>) {
+        self.velocities = vel;
+    }
+
+    pub fn set_velocities_to_temperature(&mut self, temperature: f64) {
+        let n = self.system.num_particles();
+        let masses = self.system.masses();
+        let scales: Vec<f32> = masses
+            .iter()
+            .map(|&mass| {
+                if mass == 0.0 {
+                    0.0
+                } else {
+                    (BOLTZMANN * temperature / mass).sqrt() as f32
+                }
+            })
+            .collect();
+        let scale_tensor =
+            Tensor::<B, 1>::from_floats(scales.as_slice(), &self.device).reshape([n, 1]);
+        let noise = Tensor::<B, 2>::random(
+            [n, 3],
+            burn::tensor::Distribution::Normal(0.0, 1.0),
+            &self.device,
+        );
+        self.velocities = noise * scale_tensor;
+
+        let offset = self.integrator.velocity_time_offset();
+        if offset != 0.0 {
+            let (forces, _) = self.calc_forces_and_energy();
+            let inv_masses: Vec<f32> = masses
+                .iter()
+                .map(|&mass| {
+                    if mass == 0.0 {
+                        0.0
+                    } else {
+                        (1.0 / mass) as f32
+                    }
+                })
+                .collect();
+            let correction = Tensor::<B, 1>::from_floats(inv_masses.as_slice(), &self.device)
+                .reshape([n, 1])
+                * (offset as f32);
+            self.velocities = self.velocities.clone() - forces * correction;
+        }
+    }
+
+    pub fn get_time(&self) -> f64 {
+        self.time
+    }
+
+    pub fn set_time(&mut self, time: f64) {
+        self.time = time;
+    }
+
+    pub fn get_step_count(&self) -> u64 {
+        self.step_count
+    }
+
+    pub fn set_step_count(&mut self, step_count: u64) {
+        self.step_count = step_count;
+    }
+
+    pub fn set_periodic_box_vectors(&mut self, vectors: BoxVectors) {
+        validate_box_vectors(&vectors);
+        self.periodic_box_vectors = Some(vectors);
+    }
+
+    pub fn periodic_box_vectors(&self) -> Option<&BoxVectors> {
+        self.periodic_box_vectors.as_ref()
+    }
+
+    pub fn set_parameter(&mut self, name: &str, value: f64) {
+        assert!(
+            self.parameters.contains_key(name),
+            "unknown global parameter '{name}'"
+        );
+        for force in self.system.forces_mut() {
+            let _ = force.set_global_parameter(name, value);
+        }
+        self.parameters.insert(name.to_string(), value);
+    }
+
+    pub fn get_parameter(&self, name: &str) -> f64 {
+        *self
+            .parameters
+            .get(name)
+            .unwrap_or_else(|| panic!("unknown global parameter '{name}'"))
+    }
+
+    pub fn get_parameters(&self) -> &HashMap<String, f64> {
+        &self.parameters
+    }
+
+    pub fn set_state(&mut self, state: &State<B>) {
+        self.time = state.time;
+        self.step_count = state.step_count;
+
+        if let Some(parameters) = &state.parameters {
+            for (name, &value) in parameters {
+                self.set_parameter(name, value);
+            }
+        }
+        if let Some(vectors) = state.periodic_box_vectors {
+            self.set_periodic_box_vectors(vectors);
+        }
+        if let Some(positions) = &state.positions {
+            self.positions = positions.clone();
+        }
+        if let Some(velocities) = &state.velocities {
+            self.velocities = velocities.clone();
+        }
+    }
+
+    pub fn update_custom_external_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &CustomExternalForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<CustomExternalForce>()
+            .unwrap_or_else(|| panic!("force at index {force_index} is not a CustomExternalForce"));
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_custom_bond_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &CustomBondForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<CustomBondForce>()
+            .unwrap_or_else(|| panic!("force at index {force_index} is not a CustomBondForce"));
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_custom_angle_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &CustomAngleForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<CustomAngleForce>()
+            .unwrap_or_else(|| panic!("force at index {force_index} is not a CustomAngleForce"));
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_custom_nonbonded_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &CustomNonbondedForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<CustomNonbondedForce>()
+            .unwrap_or_else(|| {
+                panic!("force at index {force_index} is not a CustomNonbondedForce")
+            });
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_custom_torsion_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &CustomTorsionForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<CustomTorsionForce>()
+            .unwrap_or_else(|| panic!("force at index {force_index} is not a CustomTorsionForce"));
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_harmonic_bond_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &HarmonicBondForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<HarmonicBondForce>()
+            .unwrap_or_else(|| panic!("force at index {force_index} is not a HarmonicBondForce"));
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_harmonic_angle_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &HarmonicAngleForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<HarmonicAngleForce>()
+            .unwrap_or_else(|| panic!("force at index {force_index} is not a HarmonicAngleForce"));
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_periodic_torsion_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &PeriodicTorsionForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<PeriodicTorsionForce>()
+            .unwrap_or_else(|| {
+                panic!("force at index {force_index} is not a PeriodicTorsionForce")
+            });
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_nonbonded_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &NonbondedForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<NonbondedForce>()
+            .unwrap_or_else(|| panic!("force at index {force_index} is not a NonbondedForce"));
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_rb_torsion_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &RBTorsionForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<RBTorsionForce>()
+            .unwrap_or_else(|| panic!("force at index {force_index} is not a RBTorsionForce"));
+        target.update_parameters_from(source);
+    }
+
+    /// Compute forces from all force terms.
+    pub fn calc_forces_and_energy(&self) -> (Tensor<B, 2>, f64) {
+        let n = self.system.num_particles();
+        let box_vecs = self
+            .periodic_box_vectors
+            .or_else(|| self.system.default_periodic_box_vectors().copied());
+        let mut total_forces: Tensor<B, 2> = Tensor::zeros([n, 3], &self.device);
+        let mut total_energy = 0.0f64;
+
+        for force in self.system.forces() {
+            let (f, e) = force.calc_forces_and_energy(&self.positions, box_vecs.as_ref());
+            total_forces = total_forces + f;
+            total_energy += e;
+        }
+
+        (total_forces, total_energy)
+    }
+
+    /// Advance by one integrator step.
+    pub fn step(&mut self, steps: usize) {
+        let masses: Vec<f32> = self.system.masses().iter().map(|&m| m as f32).collect();
+        let masses_tensor = Tensor::<B, 1>::from_floats(masses.as_slice(), &self.device);
+
+        for _ in 0..steps {
+            let (forces, _) = self.calc_forces_and_energy();
+            self.integrator.step(
+                &mut self.positions,
+                &mut self.velocities,
+                &forces,
+                &masses_tensor,
+            );
+            self.time += self.integrator.step_size();
+            self.step_count += 1;
+        }
+    }
+
+    pub fn get_state(&self, flags: StateFlags) -> State<B> {
+        let box_vecs = self
+            .periodic_box_vectors
+            .or_else(|| self.system.default_periodic_box_vectors().copied());
+        let (forces, potential_energy) = if flags.forces || flags.energy {
+            let (f, e) = self.calc_forces_and_energy();
+            (Some(f), Some(e))
+        } else {
+            (None, None)
+        };
+        let energy_parameter_derivatives = if flags.parameter_derivatives {
+            let mut total_derivatives = self
+                .parameters
+                .keys()
+                .map(|name| (name.clone(), 0.0))
+                .collect::<HashMap<_, _>>();
+            for force in self.system.forces() {
+                for (name, derivative) in
+                    force.energy_parameter_derivatives(&self.positions, box_vecs.as_ref())
+                {
+                    *total_derivatives.entry(name).or_insert(0.0) += derivative;
+                }
+            }
+            Some(total_derivatives)
+        } else {
+            None
+        };
+
+        // Kinetic energy: E_k = 0.5 * sum(m_i * v_i^2)  [kJ/mol]
+        // Conversion: 1 Da*(nm/ps)^2 = 1 kJ/mol
+        let kinetic_energy = if flags.energy {
+            let n = self.system.num_particles();
+            let masses: Vec<f32> = self.system.masses().iter().map(|&m| m as f32).collect();
+            let m = Tensor::<B, 1>::from_floats(masses.as_slice(), &self.device).reshape([n, 1]); // [N, 1] for broadcasting
+            let v2 = self.velocities.clone() * self.velocities.clone();
+            let ek: f32 = (m * v2).sum().into_scalar();
+            Some(0.5 * ek as f64)
+        } else {
+            None
+        };
+
+        State {
+            time: self.time,
+            step_count: self.step_count,
+            parameters: flags.parameters.then(|| self.parameters.clone()),
+            energy_parameter_derivatives,
+            periodic_box_vectors: self.periodic_box_vectors,
+            positions: flags.positions.then(|| self.positions.clone()),
+            velocities: flags.velocities.then(|| self.velocities.clone()),
+            forces,
+            potential_energy,
+            kinetic_energy,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forces::custom_bond::CustomBondForce;
+    use crate::forces::custom_external::CustomExternalForce;
+    use crate::forces::custom_nonbonded::CustomNonbondedForce;
+    use crate::forces::harmonic_bond::HarmonicBondForce;
+    use crate::forces::nonbonded::{NonbondedForce, NonbondedMethod, ONE_4PI_EPS0};
+    use crate::forces::rb_torsion::{RBTorsionForce, RBTorsionParam};
+    use crate::system::System;
+    use crate::VerletIntegrator;
+    use approx::assert_relative_eq;
+    use burn::backend::NdArray;
+
+    type B = NdArray;
+
+    #[test]
+    fn test_set_velocities_to_temperature() {
+        let mut system = System::<B>::new();
+        for _ in 0..64 {
+            system.add_particle(12.0);
+        }
+
+        let integrator = Box::new(VerletIntegrator::new(0.001));
+        let device: <B as Backend>::Device = Default::default();
+        let mut context = Context::new(system, integrator, device);
+        context.set_velocities_to_temperature(300.0);
+
+        let state = context.get_state(StateFlags {
+            positions: false,
+            velocities: false,
+            forces: false,
+            energy: true,
+            parameters: false,
+            parameter_derivatives: false,
+        });
+        let kinetic_energy = state.kinetic_energy.unwrap();
+        let expected = 0.5 * (64 * 3) as f64 * BOLTZMANN * 300.0;
+        assert_relative_eq!(kinetic_energy, expected, epsilon = expected * 0.3);
+    }
+
+    #[test]
+    fn test_time_and_step_count() {
+        let mut system = System::<B>::new();
+        system.add_particle(1.0);
+
+        let integrator = Box::new(VerletIntegrator::new(0.002));
+        let device: <B as Backend>::Device = Default::default();
+        let mut context = Context::new(system, integrator, device);
+        context.step(5);
+
+        assert_relative_eq!(context.get_time(), 0.01, epsilon = 1e-12);
+        assert_eq!(context.get_step_count(), 5);
+
+        let state = context.get_state(StateFlags {
+            positions: false,
+            velocities: false,
+            forces: false,
+            energy: false,
+            parameters: false,
+            parameter_derivatives: false,
+        });
+        assert_relative_eq!(state.time, 0.01, epsilon = 1e-12);
+        assert_eq!(state.step_count, 5);
+    }
+
+    #[test]
+    fn test_runtime_periodic_box_vectors_override_system_default() {
+        let mut system = System::<B>::new();
+        system.add_particle(1.0);
+        system.add_particle(1.0);
+        system.set_default_periodic_box_vectors([
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 2.0],
+        ]);
+
+        let mut nonbonded = NonbondedForce::new();
+        nonbonded.set_nonbonded_method(NonbondedMethod::CutoffPeriodic);
+        nonbonded.set_cutoff_distance(2.0);
+        nonbonded.add_particle(1.0, 1.0, 0.0);
+        nonbonded.add_particle(-1.0, 1.0, 0.0);
+        system.add_force(Box::new(nonbonded));
+
+        let integrator = Box::new(VerletIntegrator::new(0.001));
+        let device: <B as Backend>::Device = Default::default();
+        let mut context = Context::new(system, integrator, device);
+        let positions =
+            Tensor::<B, 1>::from_floats([0.0_f32, 0.0, 0.0, 1.6, 0.0, 0.0], &Default::default())
+                .reshape([2, 3]);
+        context.set_positions(positions);
+
+        let (_, default_energy) = context.calc_forces_and_energy();
+        context.set_periodic_box_vectors([[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]]);
+        let (_, overridden_energy) = context.calc_forces_and_energy();
+
+        assert!(default_energy.abs() > overridden_energy.abs());
+
+        let state = context.get_state(StateFlags {
+            positions: false,
+            velocities: false,
+            forces: false,
+            energy: false,
+            parameters: false,
+            parameter_derivatives: false,
+        });
+        assert_eq!(
+            state.periodic_box_vectors,
+            Some([[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]])
+        );
+    }
+
+    #[test]
+    fn test_set_state_restores_snapshot() {
+        let mut system = System::<B>::new();
+        system.add_particle(1.0);
+        system.set_default_periodic_box_vectors([
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 2.0],
+        ]);
+
+        let integrator = Box::new(VerletIntegrator::new(0.001));
+        let device: <B as Backend>::Device = Default::default();
+        let mut context = Context::new(system, integrator, device);
+        context.set_time(1.25);
+        context.set_step_count(17);
+        context.set_periodic_box_vectors([[3.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 3.0]]);
+        context.set_positions(
+            Tensor::<B, 1>::from_floats([1.0_f32, 2.0, 3.0], &device).reshape([1, 3]),
+        );
+        context.set_velocities(
+            Tensor::<B, 1>::from_floats([0.1_f32, 0.2, 0.3], &device).reshape([1, 3]),
+        );
+
+        let snapshot = context.get_state(StateFlags::all());
+
+        let mut system2 = System::<B>::new();
+        system2.add_particle(1.0);
+        let integrator2 = Box::new(VerletIntegrator::new(0.001));
+        let mut restored = Context::new(system2, integrator2, device);
+        restored.set_state(&snapshot);
+
+        let state = restored.get_state(StateFlags::all());
+        assert_relative_eq!(state.time, 1.25, epsilon = 1e-12);
+        assert_eq!(state.step_count, 17);
+        assert_eq!(
+            state.periodic_box_vectors,
+            Some([[3.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 3.0]])
+        );
+
+        let pos: Vec<f32> = state
+            .positions
+            .as_ref()
+            .unwrap()
+            .clone()
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap();
+        let vel: Vec<f32> = state
+            .velocities
+            .as_ref()
+            .unwrap()
+            .clone()
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_relative_eq!(pos[0], 1.0, epsilon = 1e-6);
+        assert_relative_eq!(pos[1], 2.0, epsilon = 1e-6);
+        assert_relative_eq!(pos[2], 3.0, epsilon = 1e-6);
+        assert_relative_eq!(vel[0], 0.1, epsilon = 1e-6);
+        assert_relative_eq!(vel[1], 0.2, epsilon = 1e-6);
+        assert_relative_eq!(vel[2], 0.3, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_set_state_preserves_missing_fields() {
+        let mut system = System::<B>::new();
+        system.add_particle(1.0);
+
+        let integrator = Box::new(VerletIntegrator::new(0.001));
+        let device: <B as Backend>::Device = Default::default();
+        let mut context = Context::new(system, integrator, device);
+        context.set_velocities(
+            Tensor::<B, 1>::from_floats([0.4_f32, 0.5, 0.6], &device).reshape([1, 3]),
+        );
+
+        let positions_only = State {
+            time: 2.0,
+            step_count: 9,
+            parameters: None,
+            energy_parameter_derivatives: None,
+            periodic_box_vectors: None,
+            positions: Some(
+                Tensor::<B, 1>::from_floats([7.0_f32, 8.0, 9.0], &device).reshape([1, 3]),
+            ),
+            velocities: None,
+            forces: None,
+            potential_energy: None,
+            kinetic_energy: None,
+        };
+        context.set_state(&positions_only);
+
+        let state = context.get_state(StateFlags {
+            positions: true,
+            velocities: true,
+            forces: false,
+            energy: false,
+            parameters: false,
+            parameter_derivatives: false,
+        });
+        assert_relative_eq!(state.time, 2.0, epsilon = 1e-12);
+        assert_eq!(state.step_count, 9);
+
+        let pos: Vec<f32> = state
+            .positions
+            .as_ref()
+            .unwrap()
+            .clone()
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap();
+        let vel: Vec<f32> = state
+            .velocities
+            .as_ref()
+            .unwrap()
+            .clone()
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_relative_eq!(pos[0], 7.0, epsilon = 1e-6);
+        assert_relative_eq!(pos[1], 8.0, epsilon = 1e-6);
+        assert_relative_eq!(pos[2], 9.0, epsilon = 1e-6);
+        assert_relative_eq!(vel[0], 0.4, epsilon = 1e-6);
+        assert_relative_eq!(vel[1], 0.5, epsilon = 1e-6);
+        assert_relative_eq!(vel[2], 0.6, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_context_global_parameters_round_trip() {
+        let mut system = System::<B>::new();
+        system.add_particle(1.0);
+        system.add_particle(1.0);
+
+        let mut force = CustomBondForce::new("scale*k*(r-r0)^2").unwrap();
+        force.add_global_parameter("scale", 1.0);
+        force.add_energy_parameter_derivative("scale");
+        force.add_per_bond_parameter("r0");
+        force.add_per_bond_parameter("k");
+        force.add_bond(0, 1, vec![1.0, 2.0]);
+        system.add_force(Box::new(force));
+
+        let integrator = Box::new(VerletIntegrator::new(0.001));
+        let device: <B as Backend>::Device = Default::default();
+        let mut context = Context::new(system, integrator, device);
+        context.set_positions(
+            Tensor::<B, 1>::from_floats([0.0_f32, 0.0, 0.0, 1.5, 0.0, 0.0], &Default::default())
+                .reshape([2, 3]),
+        );
+
+        let (_, baseline_energy) = context.calc_forces_and_energy();
+        context.set_parameter("scale", 3.0);
+        let (_, scaled_energy) = context.calc_forces_and_energy();
+        assert_relative_eq!(baseline_energy, 0.5, epsilon = 1e-6);
+        assert_relative_eq!(scaled_energy, 1.5, epsilon = 1e-6);
+        assert_relative_eq!(context.get_parameter("scale"), 3.0, epsilon = 1e-12);
+
+        let snapshot = context.get_state(StateFlags {
+            positions: false,
+            velocities: false,
+            forces: false,
+            energy: false,
+            parameters: true,
+            parameter_derivatives: true,
+        });
+        assert_eq!(
+            snapshot
+                .parameters
+                .as_ref()
+                .and_then(|parameters| parameters.get("scale"))
+                .copied(),
+            Some(3.0)
+        );
+        let derivative = snapshot
+            .energy_parameter_derivatives
+            .as_ref()
+            .and_then(|derivatives| derivatives.get("scale"))
+            .copied()
+            .unwrap();
+        assert_relative_eq!(derivative, 0.5, epsilon = 1e-5);
+
+        let mut system2 = System::<B>::new();
+        system2.add_particle(1.0);
+        system2.add_particle(1.0);
+        let mut force2 = CustomBondForce::new("scale*k*(r-r0)^2").unwrap();
+        force2.add_global_parameter("scale", 1.0);
+        force2.add_energy_parameter_derivative("scale");
+        force2.add_per_bond_parameter("r0");
+        force2.add_per_bond_parameter("k");
+        force2.add_bond(0, 1, vec![1.0, 2.0]);
+        system2.add_force(Box::new(force2));
+
+        let integrator2 = Box::new(VerletIntegrator::new(0.001));
+        let mut restored = Context::new(system2, integrator2, Default::default());
+        restored.set_state(&snapshot);
+        assert_relative_eq!(restored.get_parameter("scale"), 3.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_update_custom_external_force_parameters() {
+        let mut system = System::<B>::new();
+        system.add_particle(1.0);
+
+        let mut force = CustomExternalForce::new("k*(x-x0)^2").unwrap();
+        force.add_per_particle_parameter("x0");
+        force.add_per_particle_parameter("k");
+        force.add_particle(0, vec![0.0, 1.0]);
+        let force_index = system.add_force(Box::new(force));
+
+        let integrator = Box::new(VerletIntegrator::new(0.001));
+        let device: <B as Backend>::Device = Default::default();
+        let mut context = Context::new(system, integrator, device);
+        context.set_positions(
+            Tensor::<B, 1>::from_floats([1.5_f32, 0.0, 0.0], &Default::default()).reshape([1, 3]),
+        );
+
+        let (_, initial_energy) = context.calc_forces_and_energy();
+
+        let mut updated = CustomExternalForce::new("k*(x-x0)^2").unwrap();
+        updated.add_per_particle_parameter("x0");
+        updated.add_per_particle_parameter("k");
+        updated.add_particle(0, vec![1.0, 3.0]);
+        context.update_custom_external_force_parameters(force_index, &updated);
+
+        let (_, updated_energy) = context.calc_forces_and_energy();
+        assert_relative_eq!(initial_energy, 2.25, epsilon = 1e-6);
+        assert_relative_eq!(updated_energy, 0.75, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_update_custom_nonbonded_force_parameters_preserves_context_globals() {
+        let mut system = System::<B>::new();
+        system.add_particle(1.0);
+        system.add_particle(1.0);
+
+        let mut force = CustomNonbondedForce::new("scale*q1*q2/r").unwrap();
+        force.add_global_parameter("scale", 1.0);
+        force.add_per_particle_parameter("q");
+        force.add_particle(vec![1.0]);
+        force.add_particle(vec![-1.0]);
+        let force_index = system.add_force(Box::new(force));
+
+        let integrator = Box::new(VerletIntegrator::new(0.001));
+        let device: <B as Backend>::Device = Default::default();
+        let mut context = Context::new(system, integrator, device);
+        context.set_positions(
+            Tensor::<B, 1>::from_floats([0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0], &Default::default())
+                .reshape([2, 3]),
+        );
+        context.set_parameter("scale", 2.0);
+
+        let (_, initial_energy) = context.calc_forces_and_energy();
+
+        let mut updated = CustomNonbondedForce::new("scale*q1*q2/r").unwrap();
+        updated.add_global_parameter("scale", 7.0);
+        updated.add_per_particle_parameter("q");
+        updated.add_particle(vec![2.0]);
+        updated.add_particle(vec![-1.0]);
+        context.update_custom_nonbonded_force_parameters(force_index, &updated);
+
+        let (_, updated_energy) = context.calc_forces_and_energy();
+        assert_relative_eq!(initial_energy, -2.0, epsilon = 1e-6);
+        assert_relative_eq!(updated_energy, -4.0, epsilon = 1e-6);
+        assert_relative_eq!(context.get_parameter("scale"), 2.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_update_harmonic_bond_force_parameters() {
+        let mut system = System::<B>::new();
+        system.add_particle(1.0);
+        system.add_particle(1.0);
+
+        let mut force = HarmonicBondForce::new();
+        force.add_bond(0, 1, 1.0, 2.0);
+        let force_index = system.add_force(Box::new(force));
+
+        let integrator = Box::new(VerletIntegrator::new(0.001));
+        let device: <B as Backend>::Device = Default::default();
+        let mut context = Context::new(system, integrator, device);
+        context.set_positions(
+            Tensor::<B, 1>::from_floats([0.0_f32, 0.0, 0.0, 1.5, 0.0, 0.0], &Default::default())
+                .reshape([2, 3]),
+        );
+
+        let (_, initial_energy) = context.calc_forces_and_energy();
+
+        let mut updated = HarmonicBondForce::new();
+        updated.add_bond(0, 1, 1.25, 4.0);
+        context.update_harmonic_bond_force_parameters(force_index, &updated);
+
+        let (_, updated_energy) = context.calc_forces_and_energy();
+        assert_relative_eq!(initial_energy, 0.25, epsilon = 1e-6);
+        assert_relative_eq!(updated_energy, 0.125, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_update_nonbonded_force_parameters() {
+        let mut system = System::<B>::new();
+        system.add_particle(1.0);
+        system.add_particle(1.0);
+
+        let mut force = NonbondedForce::new();
+        force.add_particle(1.0, 1.0, 0.0);
+        force.add_particle(-1.0, 1.0, 0.0);
+        let force_index = system.add_force(Box::new(force));
+
+        let integrator = Box::new(VerletIntegrator::new(0.001));
+        let device: <B as Backend>::Device = Default::default();
+        let mut context = Context::new(system, integrator, device);
+        context.set_positions(
+            Tensor::<B, 1>::from_floats([0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0], &Default::default())
+                .reshape([2, 3]),
+        );
+
+        let (_, initial_energy) = context.calc_forces_and_energy();
+
+        let mut updated = NonbondedForce::new();
+        updated.add_particle(2.0, 1.0, 0.0);
+        updated.add_particle(-1.0, 1.0, 0.0);
+        context.update_nonbonded_force_parameters(force_index, &updated);
+
+        let (_, updated_energy) = context.calc_forces_and_energy();
+        assert_relative_eq!(initial_energy, -ONE_4PI_EPS0, epsilon = 1e-6);
+        assert_relative_eq!(updated_energy, -2.0 * ONE_4PI_EPS0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_update_rb_torsion_force_parameters() {
+        let mut system = System::<B>::new();
+        for _ in 0..4 {
+            system.add_particle(1.0);
+        }
+
+        let mut force = RBTorsionForce::new();
+        force.add_torsion(RBTorsionParam::new(
+            [0, 1, 2, 3],
+            [1.0, 0.5, 0.0, 0.0, 0.0, 0.0],
+        ));
+        let force_index = system.add_force(Box::new(force));
+
+        let integrator = Box::new(VerletIntegrator::new(0.001));
+        let device: <B as Backend>::Device = Default::default();
+        let mut context = Context::new(system, integrator, device);
+        context.set_positions(
+            Tensor::<B, 1>::from_floats(
+                [
+                    0.0_f32, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0,
+                ],
+                &Default::default(),
+            )
+            .reshape([4, 3]),
+        );
+
+        let (_, initial_energy) = context.calc_forces_and_energy();
+
+        let mut updated = RBTorsionForce::new();
+        updated.add_torsion(RBTorsionParam::new(
+            [0, 1, 2, 3],
+            [2.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+        ));
+        context.update_rb_torsion_force_parameters(force_index, &updated);
+
+        let (_, updated_energy) = context.calc_forces_and_energy();
+        assert!(updated_energy > initial_energy);
+    }
+}
