@@ -26,6 +26,7 @@ pub use tabulated::{
 pub use virtual_sites::VirtualSite;
 
 // Commonly used force re-exports.
+pub use forces::cmap_torsion::CMAPTorsionForce;
 pub use forces::custom_angle::CustomAngleForce;
 pub use forces::custom_bond::CustomBondForce;
 pub use forces::custom_external::CustomExternalForce;

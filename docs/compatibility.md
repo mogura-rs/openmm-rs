@@ -46,7 +46,7 @@ revision in generated validation results.
 | --- | --- | --- |
 | Core state and parameters | Partial | Force groups, integration masks, state filtering, molecular connectivity and molecule-preserving periodic wrapping are implemented; checkpointing and broader validation remain |
 | Virtual sites | Partial | Five site types, nested dependencies and force redistribution are implemented; see the fractional symmetry exception below |
-| Bonded forces | Partial | Reference coverage, CMAP, GPU execution |
+| Bonded forces | Partial | Harmonic bonds/angles, periodic/RB torsions and CMAP have analytic forces and reference comparisons; broader API validation and GPU execution remain |
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Five force types use compiled scalar expressions, shared subexpressions and analytic coordinate/parameter derivatives; six tabulated function types are available for CustomNonbondedForce; geometric functions, other force types and broader API coverage remain |
@@ -63,7 +63,9 @@ integrator configurations at four time points, forty-one nonbonded configuration
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
 wrapping configurations, six minimization configurations and 184 custom-expression
-states with forces and parameter derivatives, plus 1,134 tabulated-function states.
+states with forces and parameter derivatives, plus 1,134 tabulated-function states and 480 CMAP states.
+CMAP fixtures cover five map sizes, shared atoms, angle boundaries, triclinic
+periodicity, runtime map changes, force groups and four-step Verlet trajectories.
 Nonbonded fixtures include Ewald, electrostatic/dispersion PME, neutral and charged
 systems, exceptions, runtime offsets, parameter updates and periodic box changes.
 Mesh parameters are fixed when a Context is initialized, as in the reference.

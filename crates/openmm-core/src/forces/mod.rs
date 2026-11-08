@@ -1,3 +1,4 @@
+pub mod cmap_torsion;
 pub mod custom_angle;
 pub mod custom_bond;
 mod custom_evaluator;

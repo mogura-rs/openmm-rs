@@ -3,6 +3,7 @@
 use burn::prelude::*;
 
 use crate::constraints::{ConstraintError, ConstraintSolver};
+use crate::forces::cmap_torsion::CMAPTorsionForce;
 use crate::forces::custom_angle::CustomAngleForce;
 use crate::forces::custom_bond::CustomBondForce;
 use crate::forces::custom_external::CustomExternalForce;
@@ -344,6 +345,23 @@ impl<B: Backend> Context<B> {
             .as_any_mut()
             .downcast_mut::<HarmonicAngleForce>()
             .unwrap_or_else(|| panic!("force at index {force_index} is not a HarmonicAngleForce"));
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_cmap_torsion_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &CMAPTorsionForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<CMAPTorsionForce>()
+            .unwrap_or_else(|| panic!("force at index {force_index} is not a CMAPTorsionForce"));
         target.update_parameters_from(source);
     }
 

@@ -1,6 +1,8 @@
 // Thin pyo3 wrapper. All simulation logic lives in openmm-core.
 // Backend is fixed to NdArray (CPU) at the Python boundary.
+mod cmap_torsion;
 mod tabulated;
+use cmap_torsion::PyCMAPTorsionForce;
 mod virtual_sites;
 use burn::backend::NdArray;
 use burn::prelude::{Backend, Tensor};
@@ -1796,6 +1798,9 @@ impl PySystem {
     }
 
     fn add_force(&mut self, force: &Bound<'_, PyAny>) -> PyResult<usize> {
+        if let Ok(force) = force.extract::<PyRef<'_, PyCMAPTorsionForce>>() {
+            return Ok(self.inner_mut().add_force(Box::new(force.inner.clone())));
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyNonbondedForce>>() {
             let inner = &force.inner;
             return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
@@ -2017,6 +2022,11 @@ impl PyContext {
         force_index: usize,
         force: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        if let Ok(force) = force.extract::<PyRef<'_, PyCMAPTorsionForce>>() {
+            self.inner
+                .update_cmap_torsion_force_parameters(force_index, &force.inner);
+            return Ok(());
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomExternalForce>>() {
             let inner = &force.inner;
             self.inner
@@ -2129,6 +2139,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCustomBondForce>()?;
     m.add_class::<PyCustomAngleForce>()?;
     m.add_class::<PyCustomNonbondedForce>()?;
+    m.add_class::<PyCMAPTorsionForce>()?;
     tabulated::register(m)?;
     m.add_class::<PyCustomTorsionForce>()?;
     m.add_class::<PyHarmonicBondForce>()?;
