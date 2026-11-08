@@ -6,15 +6,28 @@ use std::sync::{Arc, Mutex};
 type Complex64 = Complex<f64>;
 
 #[derive(Default)]
-pub(crate) struct PmeCache(Mutex<Option<Workspace>>);
+pub(crate) struct PmeCache {
+    workspace: Mutex<Option<Workspace>>,
+    dispersion: bool,
+}
 
 impl Clone for PmeCache {
     fn clone(&self) -> Self {
-        Self::default()
+        Self {
+            workspace: Mutex::default(),
+            dispersion: self.dispersion,
+        }
     }
 }
 
 impl PmeCache {
+    pub(crate) fn dispersion() -> Self {
+        Self {
+            workspace: Mutex::default(),
+            dispersion: true,
+        }
+    }
+
     pub fn evaluate(
         &self,
         positions: &[f64],
@@ -24,17 +37,21 @@ impl PmeCache {
         dimensions: [usize; 3],
         forces: &mut [f64],
     ) -> f64 {
-        let mut guard = self.0.lock().unwrap();
+        let mut guard = self.workspace.lock().unwrap();
         if guard
             .as_ref()
             .is_none_or(|workspace| workspace.dimensions != dimensions)
         {
             *guard = Some(Workspace::new(dimensions));
         }
-        guard
-            .as_mut()
-            .unwrap()
-            .evaluate(positions, particles, box_vectors, alpha, forces)
+        guard.as_mut().unwrap().evaluate(
+            positions,
+            particles,
+            box_vectors,
+            alpha,
+            forces,
+            self.dispersion,
+        )
     }
 }
 
@@ -209,12 +226,21 @@ impl Workspace {
         box_vectors: &[[f64; 3]; 3],
         alpha: f64,
         forces: &mut [f64],
+        dispersion: bool,
     ) -> f64 {
+        let amplitude = |particle: &ParticleParam| {
+            if dispersion {
+                2.0 * particle.epsilon.sqrt() * particle.sigma.powi(3)
+            } else {
+                particle.charge
+            }
+        };
         let (reciprocal, volume) = reciprocal_box(box_vectors);
         let [nx, ny, nz] = self.dimensions;
         self.grid.fill(Complex64::default());
         for (position, particle) in positions.chunks_exact(3).zip(particles) {
-            if particle.charge == 0.0 {
+            let charge = amplitude(particle);
+            if charge == 0.0 {
                 continue;
             }
             let (indices, w, _) = stencil(position, &reciprocal, self.dimensions);
@@ -223,7 +249,7 @@ impl Workspace {
                     for iz in 0..5 {
                         let index = (((indices[0] + ix) % nx) * ny + (indices[1] + iy) % ny) * nz
                             + (indices[2] + iz) % nz;
-                        self.grid[index].re += particle.charge * w[0][ix] * w[1][iy] * w[2][iz];
+                        self.grid[index].re += charge * w[0][ix] * w[1][iy] * w[2][iz];
                     }
                 }
             }
@@ -241,7 +267,7 @@ impl Workspace {
             for y in 0..ny {
                 for z in 0..nz {
                     let index = (x * ny + y) * nz + z;
-                    if index == 0 {
+                    if index == 0 && !dispersion {
                         self.grid[index] = Complex64::default();
                         continue;
                     }
@@ -254,13 +280,17 @@ impl Workspace {
                                 .powi(2)
                         })
                         .sum::<f64>();
-                    let influence = ONE_4PI_EPS0 * (-PI * PI * k2 / (alpha * alpha)).exp()
-                        / (PI
-                            * volume
-                            * k2
-                            * self.moduli[0][x]
-                            * self.moduli[1][y]
-                            * self.moduli[2][z]);
+                    let moduli = self.moduli[0][x] * self.moduli[1][y] * self.moduli[2][z];
+                    let influence = if dispersion {
+                        let k = k2.sqrt();
+                        let b = PI * k / alpha;
+                        -PI * PI.sqrt() / (3.0 * volume * moduli)
+                            * (2.0 * PI.powi(3) * PI.sqrt() * libm::erfc(b) * k * k2
+                                + (-b * b).exp() * (alpha.powi(3) - 2.0 * alpha * PI * PI * k2))
+                    } else {
+                        ONE_4PI_EPS0 * (-PI * PI * k2 / (alpha * alpha)).exp()
+                            / (PI * volume * k2 * moduli)
+                    };
                     energy += 0.5 * influence * self.grid[index].norm_sqr();
                     self.grid[index] *= influence;
                 }
@@ -272,7 +302,8 @@ impl Workspace {
             .zip(particles)
             .zip(forces.chunks_exact_mut(3))
         {
-            if particle.charge == 0.0 {
+            let charge = amplitude(particle);
+            if charge == 0.0 {
                 continue;
             }
             let (indices, w, dw) = stencil(position, &reciprocal, self.dimensions);
@@ -290,7 +321,7 @@ impl Workspace {
                 }
             }
             for (axis, value) in force.iter_mut().enumerate() {
-                *value -= particle.charge
+                *value -= charge
                     * (0..3)
                         .map(|d| gradient[d] * self.dimensions[d] as f64 * reciprocal[d][axis])
                         .sum::<f64>();

@@ -37,19 +37,26 @@ pub struct Context<B: Backend> {
 }
 
 impl<B: Backend<FloatElem = f32>> Context<B> {
-    pub fn new(system: System<B>, integrator: Box<dyn Integrator<B>>, device: B::Device) -> Self {
+    pub fn new(
+        mut system: System<B>,
+        integrator: Box<dyn Integrator<B>>,
+        device: B::Device,
+    ) -> Self {
         let n = system.num_particles();
         assert!(
             n > 0,
             "cannot create a context for a system with no particles"
         );
+        let periodic_box_vectors = system.default_periodic_box_vectors().copied();
+        for force in system.forces_mut() {
+            force.initialize(n, periodic_box_vectors.as_ref());
+        }
         let masses = system.masses();
         let virtual_sites = VirtualSitePlan::new(system.virtual_sites(), &masses);
         let constraints = ConstraintSolver::new(system.constraints(), &masses)
             .unwrap_or_else(|error| panic!("{error}"));
         let masses: Vec<f32> = masses.into_iter().map(|mass| mass as f32).collect();
         let masses = Tensor::<B, 1>::from_floats(masses.as_slice(), &device);
-        let periodic_box_vectors = system.default_periodic_box_vectors().copied();
         let mut parameters = HashMap::new();
         for force in system.forces() {
             for (name, value) in force.global_parameters() {

@@ -146,14 +146,15 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - `VerletIntegrator` — leapfrog
 - `LangevinMiddleIntegrator` — LFMiddle splitting
 - `BrownianIntegrator` — overdamped Langevin
-- `NonbondedForce` — cutoff/reaction field, PME, switching and dispersion correction
+- `NonbondedForce` — cutoff/reaction field, Ewald, PME, LJPME, parameter offsets, switching and dispersion correction
+- Virtual sites — averages, out-of-plane, local coordinates, symmetry and nested dependencies
 - Constraints — sparse SHAKE/RATTLE position and velocity projection
 - Custom bond, angle, torsion, external and nonbonded forces — partial expression support
 - Python wrappers — partial snake_case CPU interface
 
 ### Next
 1. Complete the compatibility checklist in `docs/compatibility.md`.
-2. Add Ewald/LJPME, parameter offsets, virtual sites, force groups and pressure control.
+2. Add force groups and pressure control, and broaden numerical coverage.
 3. Extend custom expressions/forces, integrators and Python API compatibility.
 4. Implement resident GPU force evaluation and validate through Slurm.
 5. Measure and optimize throughput and peak host/device memory without weakening numerical validation.

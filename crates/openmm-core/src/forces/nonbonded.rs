@@ -1,12 +1,14 @@
 // NonbondedForce: LJ + Coulomb with exclusions/exceptions.
-// Methods: NoCutoff, CutoffNonPeriodic, CutoffPeriodic, PME.
+// Methods: NoCutoff, CutoffNonPeriodic, CutoffPeriodic, Ewald, PME, LJPME.
 // Reference test: openmm/tests/TestNonbondedForce.h
 // Reference impl: openmm/platforms/reference/src/SimTKReference/ReferenceNonbondedIxn.cpp
+use super::ewald::{self, EwaldCache};
 use super::neighbors::NeighborCells;
 use super::pme::{reciprocal_box, PmeCache};
 use super::Force;
 use crate::forces::harmonic_bond::apply_minimum_image_ortho;
 use burn::prelude::*;
+use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::sync::OnceLock;
 
@@ -22,8 +24,12 @@ pub enum NonbondedMethod {
     CutoffNonPeriodic,
     /// Cutoff with periodic boundary conditions.
     CutoffPeriodic,
+    /// Direct Ewald summation (rectangular periodic boxes).
+    Ewald,
     /// Particle Mesh Ewald (periodic).
     PME,
+    /// PME electrostatics and dispersion.
+    LJPME,
 }
 
 /// Per-particle nonbonded parameters.
@@ -50,10 +56,30 @@ pub struct ExceptionParam {
     pub epsilon: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ParameterOffset {
+    pub parameter: String,
+    pub index: usize,
+    pub charge_scale: f64,
+    pub sigma_scale: f64,
+    pub epsilon_scale: f64,
+}
+
+#[derive(Clone)]
+struct EffectiveParameters {
+    particles: Vec<ParticleParam>,
+    exceptions: Vec<ExceptionParam>,
+}
+
 #[derive(Clone)]
 pub struct NonbondedForce {
     particles: Vec<ParticleParam>,
     exceptions: Vec<ExceptionParam>,
+    global_parameters: Vec<(String, f64)>,
+    parameter_values: HashMap<String, f64>,
+    particle_offsets: Vec<ParameterOffset>,
+    exception_offsets: Vec<ParameterOffset>,
+    effective_parameters: OnceLock<EffectiveParameters>,
     method: NonbondedMethod,
     /// Cutoff distance in nm.
     cutoff_distance: f64,
@@ -67,6 +93,11 @@ pub struct NonbondedForce {
     switching_distance: f64,
     pme_parameters: Option<(f64, [usize; 3])>,
     pme_cache: PmeCache,
+    ljpme_parameters: Option<(f64, [usize; 3])>,
+    ljpme_cache: PmeCache,
+    ewald_cache: EwaldCache,
+    initialized_reciprocal: Option<(f64, [usize; 3])>,
+    initialized_ljpme: Option<(f64, [usize; 3])>,
     dispersion_coefficient: OnceLock<f64>,
     exclusions: OnceLock<std::collections::HashSet<(usize, usize)>>,
     neighbor_cells: NeighborCells,
@@ -78,6 +109,11 @@ impl NonbondedForce {
         Self {
             particles: Vec::new(),
             exceptions: Vec::new(),
+            global_parameters: Vec::new(),
+            parameter_values: HashMap::new(),
+            particle_offsets: Vec::new(),
+            exception_offsets: Vec::new(),
+            effective_parameters: OnceLock::new(),
             method: NonbondedMethod::NoCutoff,
             cutoff_distance: 1.0,
             reaction_field_dielectric: 78.3,
@@ -88,6 +124,11 @@ impl NonbondedForce {
             switching_distance: -1.0,
             pme_parameters: None,
             pme_cache: PmeCache::default(),
+            ljpme_parameters: None,
+            ljpme_cache: PmeCache::dispersion(),
+            ewald_cache: EwaldCache::default(),
+            initialized_reciprocal: None,
+            initialized_ljpme: None,
             dispersion_coefficient: OnceLock::new(),
             exclusions: OnceLock::new(),
             neighbor_cells: NeighborCells::default(),
@@ -99,6 +140,7 @@ impl NonbondedForce {
     pub fn add_particle(&mut self, charge: f64, sigma: f64, epsilon: f64) -> usize {
         validate_particle_parameters(charge, sigma, epsilon);
         self.dispersion_coefficient.take();
+        self.effective_parameters.take();
         self.particles.push(ParticleParam {
             charge,
             sigma,
@@ -110,6 +152,7 @@ impl NonbondedForce {
     pub fn set_particle_parameters(&mut self, index: usize, charge: f64, sigma: f64, epsilon: f64) {
         validate_particle_parameters(charge, sigma, epsilon);
         self.dispersion_coefficient.take();
+        self.effective_parameters.take();
         self.particles[index] = ParticleParam {
             charge,
             sigma,
@@ -135,6 +178,8 @@ impl NonbondedForce {
         epsilon: f64,
     ) -> usize {
         self.exclusions.take();
+        self.effective_parameters.take();
+        validate_particle_parameters(charge_prod, sigma, epsilon);
         self.exceptions.push(ExceptionParam {
             particle1: p1,
             particle2: p2,
@@ -155,6 +200,8 @@ impl NonbondedForce {
         epsilon: f64,
     ) {
         self.exclusions.take();
+        self.effective_parameters.take();
+        validate_particle_parameters(charge_prod, sigma, epsilon);
         self.exceptions[index] = ExceptionParam {
             particle1: p1,
             particle2: p2,
@@ -170,6 +217,191 @@ impl NonbondedForce {
 
     pub fn num_exceptions(&self) -> usize {
         self.exceptions.len()
+    }
+
+    pub fn add_global_parameter(&mut self, name: &str, default: f64) -> usize {
+        assert!(
+            !name.is_empty() && default.is_finite(),
+            "global parameters require a name and a finite default value"
+        );
+        self.global_parameters.push((name.to_owned(), default));
+        self.parameter_values.insert(name.to_owned(), default);
+        self.invalidate_parameters();
+        self.global_parameters.len() - 1
+    }
+
+    pub fn num_global_parameters(&self) -> usize {
+        self.global_parameters.len()
+    }
+
+    pub fn global_parameter_name(&self, index: usize) -> &str {
+        &self.global_parameters[index].0
+    }
+
+    pub fn global_parameter_default_value(&self, index: usize) -> f64 {
+        self.global_parameters[index].1
+    }
+
+    pub fn set_global_parameter_default_value(&mut self, index: usize, value: f64) {
+        assert!(value.is_finite(), "global parameter values must be finite");
+        let (name, default) = &mut self.global_parameters[index];
+        *default = value;
+        self.parameter_values.insert(name.clone(), value);
+        self.invalidate_parameters();
+    }
+
+    pub fn set_global_parameter_name(&mut self, index: usize, name: &str) {
+        assert!(!name.is_empty(), "global parameter names must not be empty");
+        let (old_name, default) = &mut self.global_parameters[index];
+        self.parameter_values.remove(old_name);
+        self.parameter_values.insert(name.to_owned(), *default);
+        *old_name = name.to_owned();
+        self.invalidate_parameters();
+    }
+
+    fn offset(&self, parameter: &str, index: usize, scales: [f64; 3]) -> ParameterOffset {
+        assert!(
+            self.parameter_values.contains_key(parameter),
+            "unknown offset parameter '{parameter}'"
+        );
+        assert!(
+            scales.iter().all(|x| x.is_finite()),
+            "offset scales must be finite"
+        );
+        ParameterOffset {
+            parameter: parameter.to_owned(),
+            index,
+            charge_scale: scales[0],
+            sigma_scale: scales[1],
+            epsilon_scale: scales[2],
+        }
+    }
+
+    pub fn add_particle_parameter_offset(
+        &mut self,
+        parameter: &str,
+        index: usize,
+        charge: f64,
+        sigma: f64,
+        epsilon: f64,
+    ) -> usize {
+        assert!(
+            index < self.particles.len(),
+            "particle offset index out of range"
+        );
+        let offset = self.offset(parameter, index, [charge, sigma, epsilon]);
+        self.particle_offsets.push(offset);
+        self.invalidate_parameters();
+        self.particle_offsets.len() - 1
+    }
+
+    pub fn add_exception_parameter_offset(
+        &mut self,
+        parameter: &str,
+        index: usize,
+        charge: f64,
+        sigma: f64,
+        epsilon: f64,
+    ) -> usize {
+        assert!(
+            index < self.exceptions.len(),
+            "exception offset index out of range"
+        );
+        let offset = self.offset(parameter, index, [charge, sigma, epsilon]);
+        self.exception_offsets.push(offset);
+        self.invalidate_parameters();
+        self.exception_offsets.len() - 1
+    }
+
+    pub fn num_particle_parameter_offsets(&self) -> usize {
+        self.particle_offsets.len()
+    }
+    pub fn num_exception_parameter_offsets(&self) -> usize {
+        self.exception_offsets.len()
+    }
+    pub fn particle_parameter_offset(&self, index: usize) -> &ParameterOffset {
+        &self.particle_offsets[index]
+    }
+    pub fn exception_parameter_offset(&self, index: usize) -> &ParameterOffset {
+        &self.exception_offsets[index]
+    }
+
+    pub fn set_particle_parameter_offset(
+        &mut self,
+        offset_index: usize,
+        parameter: &str,
+        index: usize,
+        charge: f64,
+        sigma: f64,
+        epsilon: f64,
+    ) {
+        assert!(
+            index < self.particles.len(),
+            "particle offset index out of range"
+        );
+        self.particle_offsets[offset_index] =
+            self.offset(parameter, index, [charge, sigma, epsilon]);
+        self.invalidate_parameters();
+    }
+
+    pub fn set_exception_parameter_offset(
+        &mut self,
+        offset_index: usize,
+        parameter: &str,
+        index: usize,
+        charge: f64,
+        sigma: f64,
+        epsilon: f64,
+    ) {
+        assert!(
+            index < self.exceptions.len(),
+            "exception offset index out of range"
+        );
+        self.exception_offsets[offset_index] =
+            self.offset(parameter, index, [charge, sigma, epsilon]);
+        self.invalidate_parameters();
+    }
+
+    fn invalidate_parameters(&mut self) {
+        self.effective_parameters.take();
+        self.dispersion_coefficient.take();
+    }
+
+    fn parameters(&self) -> (&[ParticleParam], &[ExceptionParam]) {
+        if self.particle_offsets.is_empty() && self.exception_offsets.is_empty() {
+            return (&self.particles, &self.exceptions);
+        }
+        let parameters = self.effective_parameters.get_or_init(|| {
+            let mut particles = self.particles.clone();
+            let mut exceptions = self.exceptions.clone();
+            let mut seen = std::collections::HashSet::new();
+            for offset in self.particle_offsets.iter().rev() {
+                if !seen.insert((&offset.parameter, offset.index)) {
+                    continue;
+                }
+                let value = self.parameter_values[&offset.parameter];
+                let p = &mut particles[offset.index];
+                p.charge += value * offset.charge_scale;
+                p.sigma += value * offset.sigma_scale;
+                p.epsilon += value * offset.epsilon_scale;
+            }
+            seen.clear();
+            for offset in self.exception_offsets.iter().rev() {
+                if !seen.insert((&offset.parameter, offset.index)) {
+                    continue;
+                }
+                let value = self.parameter_values[&offset.parameter];
+                let p = &mut exceptions[offset.index];
+                p.charge_prod += value * offset.charge_scale;
+                p.sigma += value * offset.sigma_scale;
+                p.epsilon += value * offset.epsilon_scale;
+            }
+            EffectiveParameters {
+                particles,
+                exceptions,
+            }
+        });
+        (&parameters.particles, &parameters.exceptions)
     }
 
     /// Auto-generate exclusions (1-2, 1-3) and 1-4 scaled exceptions from a bond list.
@@ -253,7 +485,10 @@ impl NonbondedForce {
     pub fn uses_periodic_boundary_conditions(&self) -> bool {
         matches!(
             self.method,
-            NonbondedMethod::CutoffPeriodic | NonbondedMethod::PME
+            NonbondedMethod::CutoffPeriodic
+                | NonbondedMethod::Ewald
+                | NonbondedMethod::PME
+                | NonbondedMethod::LJPME
         )
     }
 
@@ -352,6 +587,38 @@ impl NonbondedForce {
         self.pme_parameters.unwrap_or((0.0, [0; 3]))
     }
 
+    pub fn set_ljpme_parameters(&mut self, alpha: f64, dimensions: [usize; 3]) {
+        assert!(
+            alpha.is_finite() && alpha >= 0.0,
+            "LJPME alpha must be nonnegative and finite"
+        );
+        assert!(
+            alpha == 0.0 || dimensions.iter().all(|&n| n >= 5),
+            "LJPME grid dimensions must be at least five"
+        );
+        self.ljpme_parameters = if alpha == 0.0 {
+            None
+        } else {
+            Some((alpha, dimensions))
+        };
+    }
+
+    pub fn ljpme_parameters(&self) -> (f64, [usize; 3]) {
+        self.ljpme_parameters.unwrap_or((0.0, [0; 3]))
+    }
+
+    pub fn effective_ljpme_parameters(&self, box_vectors: &[[f64; 3]; 3]) -> (f64, [usize; 3]) {
+        self.ljpme_parameters.unwrap_or_else(|| {
+            let alpha = (-(2.0 * self.ewald_error_tolerance).ln()).sqrt() / self.cutoff_distance;
+            let dimensions = std::array::from_fn(|axis| {
+                (alpha * box_vectors[axis][axis] / (3.0 * self.ewald_error_tolerance.powf(0.2)))
+                    .ceil()
+                    .max(6.0) as usize
+            });
+            (alpha, dimensions)
+        })
+    }
+
     pub fn effective_pme_parameters(&self, box_vectors: &[[f64; 3]; 3]) -> (f64, [usize; 3]) {
         self.pme_parameters.unwrap_or_else(|| {
             let alpha = (-(2.0 * self.ewald_error_tolerance).ln()).sqrt() / self.cutoff_distance;
@@ -367,9 +634,27 @@ impl NonbondedForce {
 
     fn dispersion_correction(&self, volume: f64) -> f64 {
         *self.dispersion_coefficient.get_or_init(|| {
+            // The reference tail coefficient uses parameter defaults, not Context values.
+            let mut default_particles = Vec::new();
+            let particles = if self.particle_offsets.is_empty() {
+                &self.particles
+            } else {
+                default_particles.extend_from_slice(&self.particles);
+                let defaults: HashMap<&str, f64> = self
+                    .global_parameters
+                    .iter()
+                    .map(|(n, v)| (n.as_str(), *v))
+                    .collect();
+                for offset in &self.particle_offsets {
+                    let value = defaults[offset.parameter.as_str()];
+                    default_particles[offset.index].sigma += value * offset.sigma_scale;
+                    default_particles[offset.index].epsilon += value * offset.epsilon_scale;
+                }
+                &default_particles
+            };
             let mut moments = [0.0; 13];
             let mut diagonal = [0.0; 13];
-            for particle in &self.particles {
+            for particle in particles {
                 let mut power = 1.0;
                 for k in 0..=12 {
                     moments[k] += particle.epsilon.sqrt() * power;
@@ -419,8 +704,39 @@ impl NonbondedForce {
             source.exceptions.len(),
             "exception count must match"
         );
+        for (old, new) in [
+            (&self.particle_offsets, &source.particle_offsets),
+            (&self.exception_offsets, &source.exception_offsets),
+        ] {
+            assert_eq!(old.len(), new.len(), "parameter offset count must match");
+            assert!(
+                new.iter().all(|n| old
+                    .iter()
+                    .any(|o| o.parameter == n.parameter && o.index == n.index)),
+                "parameter offset names and target indices must not change"
+            );
+        }
+        for (i, (old, new)) in self.exceptions.iter().zip(&source.exceptions).enumerate() {
+            assert_eq!(
+                (old.particle1, old.particle2),
+                (new.particle1, new.particle2),
+                "exception particle indices must not change"
+            );
+            let has_offset = self.exception_offsets.iter().any(|o| o.index == i);
+            assert!(
+                old.charge_prod != 0.0
+                    || old.epsilon != 0.0
+                    || has_offset
+                    || (new.charge_prod == 0.0 && new.epsilon == 0.0),
+                "excluded exceptions cannot become non-excluded without reinitialization"
+            );
+        }
         self.particles = source.particles.clone();
         self.exceptions = source.exceptions.clone();
+        self.particle_offsets = source.particle_offsets.clone();
+        self.exception_offsets = source.exception_offsets.clone();
+        self.global_parameters = source.global_parameters.clone();
+        self.effective_parameters.take();
         self.exclusions.take();
         self.dispersion_coefficient.take();
     }
@@ -435,16 +751,87 @@ impl Default for NonbondedForce {
 // --- Force computation ---
 
 impl<B: Backend> Force<B> for NonbondedForce {
+    fn initialize(&mut self, num_particles: usize, box_vectors: Option<&[[f64; 3]; 3]>) {
+        assert_eq!(
+            num_particles,
+            self.particles.len(),
+            "NonbondedForce must have one parameter record per particle"
+        );
+        let mut pairs = std::collections::HashSet::new();
+        for e in &self.exceptions {
+            assert!(
+                e.particle1 < num_particles && e.particle2 < num_particles,
+                "exception particle index out of range"
+            );
+            assert!(
+                pairs.insert((e.particle1.min(e.particle2), e.particle1.max(e.particle2))),
+                "duplicate exception pair"
+            );
+        }
+        if self.use_switching_function {
+            assert!(
+                self.switching_distance >= 0.0 && self.switching_distance < self.cutoff_distance,
+                "switching distance must be between zero and cutoff"
+            );
+        }
+        self.initialized_reciprocal = None;
+        self.initialized_ljpme = None;
+        if self.uses_periodic_boundary_conditions() {
+            let vectors = box_vectors.expect("periodic nonbonded forces require box vectors");
+            assert!(
+                (0..3).all(|axis| self.cutoff_distance <= 0.5 * vectors[axis][axis]),
+                "cutoff must not exceed half the periodic box size"
+            );
+            self.initialized_reciprocal = match self.method {
+                NonbondedMethod::Ewald => {
+                    assert!(
+                        vectors[1][0] == 0.0 && vectors[2][0] == 0.0 && vectors[2][1] == 0.0,
+                        "Ewald requires a rectangular periodic box; use PME for triclinic boxes"
+                    );
+                    Some(ewald::parameters(
+                        std::array::from_fn(|axis| vectors[axis][axis]),
+                        self.cutoff_distance,
+                        self.ewald_error_tolerance,
+                    ))
+                }
+                NonbondedMethod::PME | NonbondedMethod::LJPME => {
+                    Some(self.effective_pme_parameters(vectors))
+                }
+                _ => None,
+            };
+            if self.method == NonbondedMethod::LJPME {
+                self.initialized_ljpme = Some(self.effective_ljpme_parameters(vectors));
+            }
+        }
+    }
+
+    fn global_parameters(&self) -> HashMap<String, f64> {
+        self.global_parameters.iter().cloned().collect()
+    }
+
+    fn set_global_parameter(&mut self, name: &str, value: f64) -> bool {
+        if let Some(current) = self.parameter_values.get_mut(name) {
+            if *current != value {
+                *current = value;
+                self.effective_parameters.take();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     fn calc_forces_and_energy(
         &self,
         positions: &Tensor<B, 2>,
         box_vectors: Option<&[[f64; 3]; 3]>,
     ) -> (Tensor<B, 2>, f64) {
         let device = positions.device();
+        let (particles, exceptions) = self.parameters();
         let n = positions.dims()[0];
         assert_eq!(
             n,
-            self.particles.len(),
+            particles.len(),
             "NonbondedForce must have one parameter record per particle"
         );
         let pos: Vec<f64> = positions
@@ -459,23 +846,15 @@ impl<B: Backend> Force<B> for NonbondedForce {
         let mut energy = 0.0f64;
 
         let excluded = self.exclusions.get_or_init(|| {
-            self.exceptions
+            exceptions
                 .iter()
                 .map(|e| (e.particle1.min(e.particle2), e.particle1.max(e.particle2)))
                 .collect()
         });
 
         // Direct space: all pairs (respecting cutoff and exclusions).
-        let use_cutoff = matches!(
-            self.method,
-            NonbondedMethod::CutoffNonPeriodic
-                | NonbondedMethod::CutoffPeriodic
-                | NonbondedMethod::PME
-        );
-        let use_pbc = matches!(
-            self.method,
-            NonbondedMethod::CutoffPeriodic | NonbondedMethod::PME
-        );
+        let use_cutoff = self.method != NonbondedMethod::NoCutoff;
+        let use_pbc = self.uses_periodic_boundary_conditions();
         let cutoff2 = self.cutoff_distance * self.cutoff_distance;
         if use_pbc {
             let vectors = box_vectors.expect("periodic nonbonded forces require box vectors");
@@ -490,11 +869,28 @@ impl<B: Backend> Force<B> for NonbondedForce {
                 "switching distance must be between zero and cutoff"
             );
         }
-        let pme = if self.method == NonbondedMethod::PME {
-            Some(self.effective_pme_parameters(box_vectors.unwrap()))
-        } else {
-            None
-        };
+        let pme = self.initialized_reciprocal.or_else(|| match self.method {
+            NonbondedMethod::Ewald => {
+                let vectors = box_vectors.unwrap();
+                assert!(
+                    vectors[1][0] == 0.0 && vectors[2][0] == 0.0 && vectors[2][1] == 0.0,
+                    "Ewald requires a rectangular periodic box; use PME for triclinic boxes"
+                );
+                Some(ewald::parameters(
+                    std::array::from_fn(|axis| vectors[axis][axis]),
+                    self.cutoff_distance,
+                    self.ewald_error_tolerance,
+                ))
+            }
+            NonbondedMethod::PME | NonbondedMethod::LJPME => {
+                Some(self.effective_pme_parameters(box_vectors.unwrap()))
+            }
+            _ => None,
+        });
+        let ljpme = (self.method == NonbondedMethod::LJPME).then(|| {
+            self.initialized_ljpme
+                .unwrap_or_else(|| self.effective_ljpme_parameters(box_vectors.unwrap()))
+        });
 
         let mut evaluate_pair = |i: usize, j: usize| {
             let key = (i, j);
@@ -521,15 +917,32 @@ impl<B: Backend> Force<B> for NonbondedForce {
             }
 
             let r = r2.sqrt();
-            let pi = &self.particles[i];
-            let pj = &self.particles[j];
+            let pi = &particles[i];
+            let pj = &particles[j];
             let (mut lj_energy, mut lj_force) = lj_pair(
                 0.5 * (pi.sigma + pj.sigma),
                 (pi.epsilon * pj.epsilon).sqrt(),
                 r,
                 r2,
             );
-            if use_cutoff && self.use_switching_function && r > self.switching_distance {
+            if let Some((alpha, _)) = ljpme {
+                let c6 = 4.0 * (pi.epsilon * pj.epsilon).sqrt() * (pi.sigma * pj.sigma).powi(3);
+                let (correction, derivative) = dispersion_reciprocal_pair(c6, r2, alpha);
+                let shift = lj_pair(
+                    0.5 * (pi.sigma + pj.sigma),
+                    (pi.epsilon * pj.epsilon).sqrt(),
+                    self.cutoff_distance,
+                    cutoff2,
+                )
+                .0 + dispersion_reciprocal_pair(c6, cutoff2, alpha).0;
+                lj_energy += correction - shift;
+                lj_force += derivative;
+            }
+            if use_cutoff
+                && self.use_switching_function
+                && ljpme.is_none()
+                && r > self.switching_distance
+            {
                 let t = (r - self.switching_distance)
                     / (self.cutoff_distance - self.switching_distance);
                 let switch = 1.0 + t.powi(3) * (-10.0 + t * (15.0 - 6.0 * t));
@@ -580,30 +993,50 @@ impl<B: Backend> Force<B> for NonbondedForce {
         if let Some((alpha, dimensions)) = pme {
             let vectors = box_vectors.unwrap();
             let (_, volume) = reciprocal_box(vectors);
-            energy += self.pme_cache.evaluate(
-                &pos,
-                &self.particles,
-                vectors,
-                alpha,
-                dimensions,
-                &mut forces,
-            );
-            let charge_squared: f64 = self
-                .particles
+            energy += if self.method == NonbondedMethod::Ewald {
+                self.ewald_cache.evaluate(
+                    &pos,
+                    particles,
+                    std::array::from_fn(|axis| vectors[axis][axis]),
+                    alpha,
+                    dimensions,
+                    &mut forces,
+                )
+            } else {
+                self.pme_cache
+                    .evaluate(&pos, particles, vectors, alpha, dimensions, &mut forces)
+            };
+            let charge_squared: f64 = particles
                 .iter()
                 .map(|particle| particle.charge.powi(2))
                 .sum();
-            let total_charge: f64 = self.particles.iter().map(|particle| particle.charge).sum();
+            let total_charge: f64 = particles.iter().map(|particle| particle.charge).sum();
             energy -= ONE_4PI_EPS0
                 * (alpha / PI.sqrt() * charge_squared
                     + PI * total_charge.powi(2) / (2.0 * alpha * alpha * volume));
         }
-        if use_pbc && self.use_dispersion_correction {
+        if let Some((alpha, dimensions)) = ljpme {
+            energy += self.ljpme_cache.evaluate(
+                &pos,
+                particles,
+                box_vectors.unwrap(),
+                alpha,
+                dimensions,
+                &mut forces,
+            );
+            energy += particles
+                .iter()
+                .map(|p| p.epsilon * p.sigma.powi(6))
+                .sum::<f64>()
+                * alpha.powi(6)
+                / 3.0;
+        }
+        if use_pbc && self.use_dispersion_correction && ljpme.is_none() {
             energy += self.dispersion_correction(reciprocal_box(box_vectors.unwrap()).1);
         }
 
         // Exceptions are untruncated and use their own periodicity setting.
-        for exc in &self.exceptions {
+        for exc in exceptions {
             let i = exc.particle1;
             let j = exc.particle2;
 
@@ -624,10 +1057,18 @@ impl<B: Backend> Force<B> for NonbondedForce {
 
             let (mut e, mut f_over_r) = lj_coulomb_exception(exc, r, r2);
             if let Some((alpha, _)) = pme {
-                let charge = self.particles[i].charge * self.particles[j].charge;
+                let charge = particles[i].charge * particles[j].charge;
                 let (correction, derivative) = reciprocal_pair(charge, r, r2, alpha);
                 e -= correction;
                 f_over_r -= derivative;
+            }
+            if let Some((alpha, _)) = ljpme {
+                let pi = &particles[i];
+                let pj = &particles[j];
+                let c6 = 4.0 * (pi.epsilon * pj.epsilon).sqrt() * (pi.sigma * pj.sigma).powi(3);
+                let (correction, derivative) = dispersion_reciprocal_pair(c6, r2, alpha);
+                e += correction;
+                f_over_r += derivative;
             }
             energy += e;
             for d in 0..3 {
@@ -645,11 +1086,44 @@ impl<B: Backend> Force<B> for NonbondedForce {
     }
 
     fn uses_periodic_boundary_conditions(&self) -> bool {
-        matches!(
-            self.method,
-            NonbondedMethod::CutoffPeriodic | NonbondedMethod::PME
-        )
+        self.uses_periodic_boundary_conditions()
     }
+}
+
+/// Positive complement of the screened attractive dispersion interaction.
+fn dispersion_reciprocal_pair(c6: f64, r2: f64, alpha: f64) -> (f64, f64) {
+    if c6 == 0.0 {
+        return (0.0, 0.0);
+    }
+    let x = alpha * alpha * r2;
+    if x < 0.01 {
+        let mut term = 1.0 / 6.0;
+        let mut value = term;
+        let mut derivative = 0.0;
+        // (1-exp(-x)*(1+x+x^2/2))/x^3, avoiding cancellation at small r.
+        for k in 1..=12 {
+            term *= -x * (k + 2) as f64 / ((k + 3) * k) as f64;
+            value += term;
+            derivative += if x == 0.0 {
+                if k == 1 {
+                    -1.0 / 8.0
+                } else {
+                    0.0
+                }
+            } else {
+                k as f64 * term / x
+            };
+        }
+        return (
+            c6 * alpha.powi(6) * value,
+            2.0 * c6 * alpha.powi(8) * derivative,
+        );
+    }
+    let exponential = (-x).exp();
+    let energy = c6 / r2.powi(3) * (1.0 - exponential * (1.0 + x + 0.5 * x * x));
+    let derivative =
+        -6.0 * c6 / r2.powi(4) * (1.0 - exponential * (1.0 + x + 0.5 * x * x + x.powi(3) / 6.0));
+    (energy, derivative)
 }
 
 /// Compute energy and force/r for an exception pair (pre-combined params).
@@ -821,6 +1295,99 @@ mod tests {
             .into_iter()
             .map(|v| v as f64)
             .collect()
+    }
+
+    #[test]
+    fn reciprocal_methods_match_energy_gradients() {
+        let coordinates = [[0.1, 0.2, 0.3], [0.6, 0.4, 0.2], [2.8, 0.7, 0.4]];
+        for method in [
+            NonbondedMethod::Ewald,
+            NonbondedMethod::PME,
+            NonbondedMethod::LJPME,
+        ] {
+            let mut force = NonbondedForce::new();
+            force.set_nonbonded_method(method);
+            force.set_cutoff_distance(1.2);
+            force.set_ewald_error_tolerance(1e-5);
+            force.add_particle(0.4, 0.3, 0.5);
+            force.add_particle(-0.3, 0.32, 0.6);
+            force.add_particle(0.1, 0.34, 0.7);
+            force.add_exception(0, 2, -0.02, 0.32, 0.4);
+            force.set_exceptions_use_periodic_boundary_conditions(true);
+            let skew = if method == NonbondedMethod::Ewald {
+                0.0
+            } else {
+                0.3
+            };
+            let vectors = [[3.0, 0.0, 0.0], [skew, 3.0, 0.0], [-skew, skew, 3.0]];
+            let (forces, _) =
+                force.calc_forces_and_energy(&pos_tensor(&coordinates), Some(&vectors));
+            let forces = get_forces(forces);
+            for particle in 0..3 {
+                for axis in 0..3 {
+                    let mut plus = coordinates;
+                    let mut minus = coordinates;
+                    plus[particle][axis] = (plus[particle][axis] as f32 + 0.0005) as f64;
+                    minus[particle][axis] = (minus[particle][axis] as f32 - 0.0005) as f64;
+                    let e_plus = force
+                        .calc_forces_and_energy(&pos_tensor(&plus), Some(&vectors))
+                        .1;
+                    let e_minus = force
+                        .calc_forces_and_energy(&pos_tensor(&minus), Some(&vectors))
+                        .1;
+                    let difference =
+                        -(e_plus - e_minus) / (plus[particle][axis] - minus[particle][axis]);
+                    assert_relative_eq!(
+                        forces[3 * particle + axis],
+                        difference,
+                        epsilon = 1e-3,
+                        max_relative = 1e-4
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dispersion_complement_is_finite_at_overlap() {
+        let alpha: f64 = 2.3;
+        let c6 = 0.04;
+        let (energy, derivative) = dispersion_reciprocal_pair(c6, 0.0, alpha);
+        assert_relative_eq!(energy, c6 * alpha.powi(6) / 6.0, epsilon = 1e-14);
+        assert_relative_eq!(derivative, -c6 * alpha.powi(8) / 4.0, epsilon = 1e-14);
+        for r in [1e-5_f64, 0.02, 0.1, 0.7] {
+            let h = r * 1e-4;
+            let plus = dispersion_reciprocal_pair(c6, (r + h).powi(2), alpha).0;
+            let minus = dispersion_reciprocal_pair(c6, (r - h).powi(2), alpha).0;
+            let derivative = dispersion_reciprocal_pair(c6, r * r, alpha).1;
+            assert_relative_eq!(
+                (plus - minus) / (2.0 * h),
+                derivative * r,
+                epsilon = 1e-6,
+                max_relative = 1e-4
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_offsets_update_and_invalidate_cached_values() {
+        let mut force = NonbondedForce::new();
+        force.add_particle(0.2, 0.3, 0.4);
+        force.add_particle(-0.3, 0.35, 0.5);
+        force.add_global_parameter("lambda", 0.25);
+        force.add_particle_parameter_offset("lambda", 0, 0.4, 0.02, 0.2);
+        let positions = pos_tensor(&[[0.1, 0.2, 0.3], [0.6, 0.4, 0.2]]);
+        for value in [0.25, 0.7, -0.2, 0.25] {
+            Force::<B>::set_global_parameter(&mut force, "lambda", value);
+            let (actual_forces, actual_energy) = force.calc_forces_and_energy(&positions, None);
+            let mut explicit = NonbondedForce::new();
+            explicit.add_particle(0.2 + 0.4 * value, 0.3 + 0.02 * value, 0.4 + 0.2 * value);
+            explicit.add_particle(-0.3, 0.35, 0.5);
+            let (expected_forces, expected_energy) =
+                explicit.calc_forces_and_energy(&positions, None);
+            assert_eq!(actual_energy, expected_energy);
+            assert_eq!(get_forces(actual_forces), get_forces(expected_forces));
+        }
     }
 
     // Mirrors TestNonbondedForce.h::testCoulomb()

@@ -16,17 +16,19 @@ def main():
     om = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(om)
     fixtures = [json.loads(line) for line in args.reference.read_text().splitlines()]
-    assert len(fixtures) == 14, "reference fixture set is incomplete"
+    assert len(fixtures) == 41, "reference fixture set is incomplete"
     results = []
     for fixture in fixtures:
         name = fixture["case"]
         pme = name.startswith("pme")
-        periodic = pme or name.startswith("periodic")
+        ljpme = name.startswith("ljpme")
+        ewald = name.startswith("ewald")
+        periodic = pme or ljpme or ewald or name.startswith("periodic")
         triclinic = "triclinic" in name
         system = om.System()
         system.set_default_periodic_box_vectors((3, 0, 0), (0.4 if triclinic else 0, 3, 0), (-0.2 if triclinic else 0, 0.3 if triclinic else 0, 3))
         force = om.NonbondedForce()
-        method = "PME" if pme else "CutoffPeriodic" if periodic else "CutoffNonPeriodic" if name == "cutoff" else "NoCutoff"
+        method = "LJPME" if ljpme else "Ewald" if ewald else "PME" if pme else "CutoffPeriodic" if periodic else "CutoffNonPeriodic" if name == "cutoff" else "NoCutoff"
         force.set_nonbonded_method(method)
         force.set_cutoff_distance(1.2)
         force.set_ewald_error_tolerance(1e-5)
@@ -34,15 +36,38 @@ def main():
         force.set_use_switching_function("switch" in name)
         force.set_switching_distance(0.8)
         force.set_exceptions_use_periodic_boundary_conditions("wrapped" in name)
+        if "explicit" in name:
+            force.set_pme_parameters(2.7, 24, 25, 28)
+            force.set_ljpme_parameters(2.5, 18, 20, 21)
         for i, charge in enumerate((0.4, -0.3, 0.1, 0.2 if "charged" in name else -0.2)):
             system.add_particle(2.0)
-            force.add_particle(charge, 0.3 + 0.02*i, 0.5 + 0.1*i)
+            force.add_particle(0 if "neutral" in name else charge, 0.3 + 0.02*i, 0.5 + 0.1*i)
         if "exception" in name:
             force.add_exception(0, 2, -0.02, 0.32, 0.4)
             force.add_exception(0, 1, 0, 1, 0)
+        if "offset" in name:
+            force.add_global_parameter("lambda", 0.25)
+            force.add_global_parameter("mu", 0.1)
+            force.add_particle_parameter_offset("lambda", 0, 0.2, 0.04, 0.3)
+            force.add_particle_parameter_offset("mu", 0, -0.1, 0.01, -0.2)
+            force.add_particle_parameter_offset("lambda", 2, -0.15, -0.02, 0.2)
+            force.add_exception_parameter_offset("lambda", 0, 0.04, 0.05, 0.1)
+            force.add_exception_parameter_offset("mu", 1, 0.03, -0.2, 0.15)
         system.add_force(force)
         context = system.create_context(om.VerletIntegrator(0.001))
         context.set_positions([(0.1, 0.2, 0.3), (0.6, 0.4, 0.2), (2.8, 0.7, 0.4), (1.3, 1.1, 0.9)])
+        if "runtime" in name:
+            context.set_parameter("lambda", 0.7)
+            context.set_parameter("mu", 0.2)
+        if "update" in name:
+            context.get_state(energy=True)
+            force.set_particle_parameter_offset(0, "lambda", 0, 0.3, 0.06, -0.1)
+            force.set_exception_parameter_offset(0, "lambda", 0, -0.02, 0.01, 0.2)
+            force.set_particle_parameters(3, 0.1, 0.38, 0.7)
+            force.set_exception_parameters(0, 0, 2, 0.03, 0.36, 0.2)
+            context.update_parameters_in_context(0, force)
+        if "resize" in name:
+            context.set_periodic_box_vectors((3.4, 0, 0), (0.4 if triclinic else 0, 3.2, 0), (-0.2 if triclinic else 0, 0.3 if triclinic else 0, 3.3))
         state = context.get_state(forces=True, energy=True)
         actual = [state.potential_energy] + [v for row in state.forces for v in row]
         expected = [fixture["energy"]] + [v for row in fixture["forces"] for v in row]

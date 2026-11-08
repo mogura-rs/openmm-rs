@@ -322,6 +322,105 @@ impl PyNonbondedForce {
         self.inner_mut().add_particle(charge, sigma, epsilon)
     }
 
+    fn add_global_parameter(&mut self, name: &str, default: f64) -> usize {
+        self.inner.add_global_parameter(name, default)
+    }
+
+    fn num_global_parameters(&self) -> usize {
+        self.inner.num_global_parameters()
+    }
+    fn get_global_parameter_name(&self, index: usize) -> &str {
+        self.inner.global_parameter_name(index)
+    }
+    fn get_global_parameter_default_value(&self, index: usize) -> f64 {
+        self.inner.global_parameter_default_value(index)
+    }
+    fn set_global_parameter_name(&mut self, index: usize, name: &str) {
+        self.inner.set_global_parameter_name(index, name);
+    }
+    fn set_global_parameter_default_value(&mut self, index: usize, value: f64) {
+        self.inner.set_global_parameter_default_value(index, value);
+    }
+
+    fn add_particle_parameter_offset(
+        &mut self,
+        parameter: &str,
+        index: usize,
+        charge: f64,
+        sigma: f64,
+        epsilon: f64,
+    ) -> usize {
+        self.inner
+            .add_particle_parameter_offset(parameter, index, charge, sigma, epsilon)
+    }
+
+    fn add_exception_parameter_offset(
+        &mut self,
+        parameter: &str,
+        index: usize,
+        charge: f64,
+        sigma: f64,
+        epsilon: f64,
+    ) -> usize {
+        self.inner
+            .add_exception_parameter_offset(parameter, index, charge, sigma, epsilon)
+    }
+
+    fn num_particle_parameter_offsets(&self) -> usize {
+        self.inner.num_particle_parameter_offsets()
+    }
+    fn num_exception_parameter_offsets(&self) -> usize {
+        self.inner.num_exception_parameter_offsets()
+    }
+
+    fn get_particle_parameter_offset(&self, index: usize) -> (&str, usize, f64, f64, f64) {
+        let o = self.inner.particle_parameter_offset(index);
+        (
+            &o.parameter,
+            o.index,
+            o.charge_scale,
+            o.sigma_scale,
+            o.epsilon_scale,
+        )
+    }
+
+    fn get_exception_parameter_offset(&self, index: usize) -> (&str, usize, f64, f64, f64) {
+        let o = self.inner.exception_parameter_offset(index);
+        (
+            &o.parameter,
+            o.index,
+            o.charge_scale,
+            o.sigma_scale,
+            o.epsilon_scale,
+        )
+    }
+
+    fn set_particle_parameter_offset(
+        &mut self,
+        offset: usize,
+        parameter: &str,
+        index: usize,
+        charge: f64,
+        sigma: f64,
+        epsilon: f64,
+    ) {
+        self.inner
+            .set_particle_parameter_offset(offset, parameter, index, charge, sigma, epsilon);
+    }
+
+    fn set_exception_parameter_offset(
+        &mut self,
+        offset: usize,
+        parameter: &str,
+        index: usize,
+        charge: f64,
+        sigma: f64,
+        epsilon: f64,
+    ) {
+        self.inner
+            .set_exception_parameter_offset(offset, parameter, index, charge, sigma, epsilon);
+    }
+
     fn add_exception(
         &mut self,
         particle1: usize,
@@ -377,15 +476,26 @@ impl PyNonbondedForce {
         (alpha, nx, ny, nz)
     }
 
+    fn set_ljpme_parameters(&mut self, alpha: f64, nx: usize, ny: usize, nz: usize) {
+        self.inner_mut().set_ljpme_parameters(alpha, [nx, ny, nz]);
+    }
+
+    fn get_ljpme_parameters(&self) -> (f64, usize, usize, usize) {
+        let (alpha, [nx, ny, nz]) = self.inner_ref().ljpme_parameters();
+        (alpha, nx, ny, nz)
+    }
+
     fn set_nonbonded_method(&mut self, method: &str) -> PyResult<()> {
         let method =
             match method {
                 "NoCutoff" => NonbondedMethod::NoCutoff,
                 "CutoffNonPeriodic" => NonbondedMethod::CutoffNonPeriodic,
                 "CutoffPeriodic" => NonbondedMethod::CutoffPeriodic,
+                "Ewald" => NonbondedMethod::Ewald,
                 "PME" => NonbondedMethod::PME,
+                "LJPME" => NonbondedMethod::LJPME,
                 _ => return Err(err(
-                    "unknown method; expected NoCutoff, CutoffNonPeriodic, CutoffPeriodic, or PME",
+                    "unknown method; expected NoCutoff, CutoffNonPeriodic, CutoffPeriodic, Ewald, PME, or LJPME",
                 )),
             };
         self.inner_mut().set_nonbonded_method(method);
@@ -445,7 +555,9 @@ impl PyNonbondedForce {
             NonbondedMethod::NoCutoff => "NoCutoff",
             NonbondedMethod::CutoffNonPeriodic => "CutoffNonPeriodic",
             NonbondedMethod::CutoffPeriodic => "CutoffPeriodic",
+            NonbondedMethod::Ewald => "Ewald",
             NonbondedMethod::PME => "PME",
+            NonbondedMethod::LJPME => "LJPME",
         };
         method.to_string()
     }

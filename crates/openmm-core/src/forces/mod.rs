@@ -3,6 +3,7 @@ pub mod custom_bond;
 pub mod custom_external;
 pub mod custom_nonbonded;
 pub mod custom_torsion;
+mod ewald;
 pub mod harmonic_angle;
 pub mod harmonic_bond;
 mod neighbors;
@@ -49,6 +50,8 @@ where
 /// Returned forces tensor: shape [N, 3], units kJ/mol/nm.
 /// Returned energy: kJ/mol.
 pub trait Force<B: Backend>: Send + Sync + AsAny + ForceClone<B> {
+    fn initialize(&mut self, _num_particles: usize, _box_vectors: Option<&[[f64; 3]; 3]>) {}
+
     fn calc_forces_and_energy(
         &self,
         positions: &Tensor<B, 2>,
