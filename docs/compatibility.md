@@ -51,6 +51,7 @@ revision in generated validation results.
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Eleven force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond, GB and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Implicit solvation | Partial | GBSA-OBC and programmable CustomGB support polar/surface forces, three cutoff methods, particle updates, cell traversal and nested CV use; application parameter assignment and resident GPU execution remain |
+| Anisotropic particles | Partial | Gay-Berne energies, conservative orientation forces, exceptions and live updates are implemented; source-force exceptions are explicit; resident GPU execution remains |
 | Surface area | Partial | LCPO overlap energies, analytic forces, periodic distances and parameter updates are implemented; application parameter assignment and resident GPU execution remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator, Nose-Hoover chains, DPD, QTB and programmable CustomIntegrator have reference comparisons; checkpointing, resident GPU integration and wider molecular validation remain |
@@ -1524,6 +1525,33 @@ checks candidate completeness and duplicate absence against brute force,
 including translated coordinates. This correction applies to every force using
 the shared neighbor cells.
 
+The OBC expressions are slower than the Reference JIT in these cases. The
+six-value model with 24 requested derivatives is faster in Rust, whose reverse
+chain avoids the reference's per-parameter propagation work. Peak process RSS
+is lower in Rust for every measured condition. These results establish a
+workload-dependent tradeoff, not a universal speed advantage.
+
+| Model | Method | Particles | Rust evaluations/s | Reference evaluations/s | Rust peak RSS KiB | Reference peak RSS KiB |
+|---|---|---:|---:|---:|---:|---:|
+| OBC | NoCutoff | 256 | 15.2017 | 37.0416 | 4,440 | 8,464 |
+| OBC | NoCutoff | 1,024 | 0.9364 | 2.4787 | 4,728 | 8,860 |
+| OBC | NoCutoff | 4,096 | 0.0586 | 0.1544 | 5,812 | 9,828 |
+| OBC | Nonperiodic cutoff | 256 | 74.9484 | 141.7591 | 4,684 | 8,716 |
+| OBC | Nonperiodic cutoff | 1,024 | 14.8415 | 37.6712 | 4,856 | 9,108 |
+| OBC | Nonperiodic cutoff | 4,096 | 3.2390 | 7.8700 | 5,756 | 11,456 |
+| OBC | Periodic cutoff | 256 | 51.5322 | 91.0751 | 4,504 | 8,708 |
+| OBC | Periodic cutoff | 1,024 | 10.8036 | 22.6375 | 4,748 | 8,916 |
+| OBC | Periodic cutoff | 4,096 | 2.3739 | 4.8770 | 5,584 | 11,648 |
+| Six-value chain | NoCutoff | 256 | 29.8594 | 7.4436 | 4,428 | 12,036 |
+| Six-value chain | NoCutoff | 1,024 | 1.8609 | 0.5096 | 4,700 | 12,392 |
+| Six-value chain | NoCutoff | 4,096 | 0.1157 | 0.0316 | 6,092 | 17,248 |
+| Six-value chain | Nonperiodic cutoff | 256 | 132.7459 | 29.7904 | 4,488 | 12,436 |
+| Six-value chain | Nonperiodic cutoff | 1,024 | 26.6716 | 7.6433 | 4,708 | 12,872 |
+| Six-value chain | Nonperiodic cutoff | 4,096 | 5.7420 | 1.7850 | 6,044 | 18,440 |
+| Six-value chain | Periodic cutoff | 256 | 88.8532 | 22.3346 | 4,520 | 12,308 |
+| Six-value chain | Periodic cutoff | 1,024 | 17.7491 | 6.0278 | 4,808 | 12,952 |
+| Six-value chain | Periodic cutoff | 4,096 | 3.8952 | 1.3900 | 5,912 | 18,644 |
+
 ## LCPO surface potential
 
 `LCPOForce` implements the one-, two- and three-body overlap terms, surface
@@ -1586,6 +1614,136 @@ benchmark, not complete force-field throughput or GPU execution.
 | Periodic | 512 | 302.482 | 98.112 | 4,124 | 7,968 |
 | Periodic | 2,048 | 74.067 | 25.452 | 5,480 | 10,632 |
 | Periodic | 8,192 | 24.481 | 5.913 | 11,524 | 21,092 |
+
+## Gay-Berne anisotropic potential
+
+`GayBerneForce` supports spherical, axially symmetric and biaxial particles,
+Lorentz-Berthelot sigma/epsilon mixing, explicit exceptions, three cutoff methods,
+quintic switching, triclinic distances and nested collective variables. Particle
+frames use the specified x direction and Gram-Schmidt projection of the y direction.
+Orientation vectors use the original coordinates, matching the source; periodic
+minimum images apply only to separations between interacting centers. Keep each
+ellipsoid and its orientation particles in a consistent molecular image.
+
+The core implements f64/f32 force evaluation and Python provides both naming
+conventions for the force API. Context creation snapshots the definition. An
+explicit parameter update reloads particle orientations, exceptions (including
+changed pairs and additional exceptions), cutoff method and switching settings,
+matching the supplied Reference reconstruction. The total particle count must
+remain unchanged. Metadata and the existing Context's force group remain captured.
+
+Each particle has two symmetric shape/energy matrices and a scalar shape factor.
+The CPU workspace stores these frames and accumulated torques in linear memory;
+finite cutoffs use reusable cell candidates. Spherical pairs use scalar formulas
+without matrix inversion or torque evaluation. Pairs with isotropic energy-axis
+scales also omit the energy-matrix inverse and its orientation derivative. A
+4,096-particle allocation test
+limits the largest workspace allocation to 256 bytes per particle, rejects dense
+pair storage, and verifies one output-force allocation for the tensor API and no
+new dense allocation for warmed host accumulation. This bound applies to individual
+allocations, not the sum of every workspace buffer or process RSS.
+
+### Approved conservative-force exceptions
+
+The supplied Reference force has two orientation errors. Its derivative of the
+energy-axis factor omits a factor depending on the pair direction. In addition,
+the conversion of torques to forces uses the unprojected y-axis length and omits
+the corresponding x-axis correction when the defining vectors are not orthogonal.
+Rust differentiates the complete potential, including the Gram-Schmidt frame, and
+implements only the conservative result. Source force values and trajectories
+for general anisotropic particles are therefore intentional compatibility exceptions.
+Reference energy finite differences are the force oracle. Spherical cases also
+retain direct comparisons with the original Reference forces.
+
+The Reference kernel applies the switching polynomial even with `NoCutoff`,
+although its header says the switch is ignored. With sigma 0.3 nm, epsilon
+1 kJ/mol, separation 1.5 nm, cutoff 1 nm and switch distance 0.8 nm, enabling
+this flag changes the source energy from -0.000255983616 to 0.33997824 kJ/mol.
+Rust ignores the switch with `NoCutoff`, as approved. Initial switch-parameter
+validation still follows the source. The source Common GPU implementation also
+guards switching by the cutoff mode in its code, but it has not been executed
+as part of this validation.
+
+Rust rejects zero-length or collinear orientation axes, nonfinite parameters and
+coincident interacting centers. Zero-strength interactions return zero before
+singular distance arithmetic. These are explicit input guards; they do not attempt
+to reproduce nonfinite source values for degenerate geometries.
+
+For spherical particles whose widths equal their individual sigma values, the
+source header's claimed reduction to ordinary Lennard-Jones requires equal
+sigmas. When they differ, the contact diameter is the root-mean-square diameter
+and the shape factor also differs from one. Rust preserves this source energy;
+it does not replace the potential by Lorentz-Berthelot Lennard-Jones. A permanent
+two-sphere probe compares both expressions and asserts this distinction. For
+sigmas 0.2 and 0.4 nm, epsilon 1 kJ/mol and separation 0.65 nm, the source
+Gay-Berne energy is -0.03183537877 kJ/mol while ordinary Lennard-Jones gives
+-0.03829032596 kJ/mol.
+
+### Anisotropic validation
+
+The reference fixture contains 576 states covering three methods, three particle
+shapes, switching, direct/nested CV use, four update/coordinate phases and four
+force-group queries. It includes a fixed particle, a virtual site, changed axis
+particles, moved/added exceptions, periodic box changes and method changes within
+an existing Context. The 12,096 independent coordinate derivatives use central
+finite differences of the supplied source energies, including virtual-site force
+redistribution. After the spherical and isotropic-energy optimizations, maximum energy and force
+errors are 1.89e-15 kJ/mol and 1.60e-9 kJ/mol/nm. The original source forces differ
+from those same derivatives by up to 0.852 kJ/mol/nm; that discrepancy is retained
+in the generated report rather than hidden by a tolerance.
+
+Two six-particle biaxial systems run 20,000 steps at 0.0001 ps with harmonic
+orientation restraints, for 2 ps total, with and without periodic boundaries.
+The maximum energy variation is 1.03e-8 kJ/mol and momentum error is 1.84e-15
+Da nm/ps. All 200 sampled Rust configurations are evaluated again by the original
+source energy oracle; their maximum energy difference is 1.44e-17 kJ/mol.
+Source finite differences at the first and last samples additionally check the
+forces. These short deterministic tests establish local force consistency and
+integration stability for the specified systems, not equilibrium sampling of a
+molecular liquid.
+
+### Anisotropic performance
+
+`scripts/benchmark-gay-berne.sh` compares f64 force/energy queries on a 0.45 nm
+cubic lattice. Spherical particles vary in diameter, sigma and epsilon. Axial
+systems use one orientation particle with zero epsilon per ellipsoid, so their
+active-center count is half the particle count below. Both models have isotropic
+energy-axis scales, for which the original Reference forces are conservative.
+Cutoff methods use 0.9 nm and begin switching at 0.7 nm. The script checks energy
+and squared force norm for every measured process.
+
+Each condition has one warmup, 50/10/3 timed queries for 128/512/2,048 particles,
+and three separate processes. The table gives median queries/s and the largest
+process peak RSS across those runs. Construction is excluded from timing; RSS
+includes runtime overhead, Context storage and returned force snapshots. These
+are synthetic force queries against Reference, not optimized OpenMM CPU/GPU
+platforms or complete MD throughput.
+
+| Shape | Method | Particles | Rust queries/s | Reference queries/s | Rust peak KiB | Reference peak KiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Spherical | NoCutoff | 128 | 3224.526 | 771.521 | 3,752 | 7,200 |
+| Spherical | NoCutoff | 512 | 198.901 | 48.486 | 3,984 | 7,440 |
+| Spherical | NoCutoff | 2,048 | 12.724 | 2.997 | 4,460 | 7,904 |
+| Spherical | Nonperiodic cutoff | 128 | 5312.437 | 3849.298 | 3,760 | 7,036 |
+| Spherical | Nonperiodic cutoff | 512 | 1343.720 | 433.050 | 4,040 | 7,436 |
+| Spherical | Nonperiodic cutoff | 2,048 | 249.429 | 37.524 | 4,476 | 7,940 |
+| Spherical | Periodic cutoff | 128 | 3699.384 | 1888.996 | 3,784 | 7,076 |
+| Spherical | Periodic cutoff | 512 | 419.647 | 169.084 | 3,960 | 7,212 |
+| Spherical | Periodic cutoff | 2,048 | 106.395 | 12.507 | 4,612 | 8,072 |
+| Axial | NoCutoff | 128 | 4297.021 | 3011.313 | 3,784 | 7,208 |
+| Axial | NoCutoff | 512 | 278.271 | 189.597 | 3,976 | 7,252 |
+| Axial | NoCutoff | 2,048 | 17.371 | 11.854 | 4,644 | 7,940 |
+| Axial | Nonperiodic cutoff | 128 | 11076.977 | 9625.339 | 3,720 | 7,020 |
+| Axial | Nonperiodic cutoff | 512 | 1391.831 | 1239.513 | 3,996 | 7,180 |
+| Axial | Nonperiodic cutoff | 2,048 | 244.948 | 119.805 | 4,648 | 7,880 |
+| Axial | Periodic cutoff | 128 | 6345.835 | 4375.223 | 3,744 | 7,012 |
+| Axial | Periodic cutoff | 512 | 756.384 | 560.305 | 3,964 | 7,452 |
+| Axial | Periodic cutoff | 2,048 | 131.008 | 45.116 | 4,476 | 7,840 |
+
+The spherical path avoids per-pair matrix work. For finite cutoffs, candidate
+cells also avoid Reference's scan of all particle pairs. NoCutoff remains
+quadratic. The gains for small systems are sensitive to process startup, CPU
+frequency and scheduling; the generated summaries retain each repetition.
 
 ## Documentation discrepancies found during implementation
 
@@ -1698,6 +1856,16 @@ benchmark, not complete force-field throughput or GPU execution.
 - `LCPOForce.h` limits Context updates to surface tension and particle parameters.
   The supplied Reference kernel reinitializes its full interaction and also
   reloads the periodic-boundary flag. Rust follows that implementation.
+
+- `GayBerneForce.h` restricts Context updates to numeric parameters and excludes
+  changed orientation atoms, exception pairs/counts, methods and cutoffs. The
+  Reference kernel reconstructs the full interaction and accepts those changes.
+  Rust follows the implementation while retaining a fixed System particle count.
+- The same header says `NoCutoff` ignores switching; the supplied Reference kernel
+  applies it regardless of mode. Rust uses the approved mode guard described above.
+- Its spherical Lennard-Jones equivalence claim omits the equal-sigma condition.
+  Unequal diameters retain a different contact distance and shape prefactor, which
+  Rust preserves and checks with the source energy probe.
 
 Implementation and reference tests take precedence over outdated descriptions.
 

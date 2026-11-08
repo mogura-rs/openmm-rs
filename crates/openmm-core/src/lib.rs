@@ -33,6 +33,7 @@ pub use forces::custom_external::CustomExternalForce;
 pub use forces::custom_gb::{CustomGBForce, CustomGBMethod, GBComputationType};
 pub use forces::custom_nonbonded::{CustomNonbondedForce, CustomNonbondedMethod};
 pub use forces::custom_torsion::CustomTorsionForce;
+pub use forces::gay_berne::{GayBerneException, GayBerneForce, GayBerneMethod, GayBerneParticle};
 pub use forces::gbsa_obc::{GBSAOBCForce, GBSAOBCMethod, GBSAParticle};
 pub use forces::harmonic_angle::HarmonicAngleForce;
 pub use forces::harmonic_bond::HarmonicBondForce;

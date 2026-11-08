@@ -580,6 +580,15 @@ impl<B: Backend> Context<B> {
             .expect("invalid CustomGB force update");
     }
 
+    pub fn update_gay_berne_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &crate::GayBerneForce,
+    ) {
+        self.update_force_parameters_at_path(&[force_index], source)
+            .expect("invalid Gay-Berne force update");
+    }
+
     pub fn update_lcpo_force_parameters(&mut self, force_index: usize, source: &crate::LCPOForce) {
         self.update_force_parameters_at_path(&[force_index], source)
             .expect("invalid LCPO force update");

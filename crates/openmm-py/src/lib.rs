@@ -1,5 +1,7 @@
 mod custom_gb;
 use custom_gb::PyCustomGBForce;
+mod gay_berne;
+use gay_berne::PyGayBerneForce;
 mod lcpo;
 use lcpo::PyLCPOForce;
 mod gbsa_obc;
@@ -1818,6 +1820,9 @@ impl PySystem {
 }
 
 fn extract_force_snapshot(force: &Bound<'_, PyAny>) -> PyResult<Box<dyn openmm_core::Force<B>>> {
+    if let Ok(force) = force.extract::<PyRef<'_, PyGayBerneForce>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
     if let Ok(force) = force.extract::<PyRef<'_, PyLCPOForce>>() {
         return Ok(Box::new(force.inner.clone()));
     }
@@ -2184,6 +2189,12 @@ impl PyContext {
                 .update_custom_gb_force_parameters(force_index, &force.snapshot()?);
             return Ok(());
         }
+        if let Ok(force) = force.extract::<PyRef<'_, PyGayBerneForce>>() {
+            self.inner
+                .borrow_mut()
+                .update_gay_berne_force_parameters(force_index, &force.inner);
+            return Ok(());
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyLCPOForce>>() {
             self.inner
                 .borrow_mut()
@@ -2287,6 +2298,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     integrators::register(m)?;
     gbsa_obc::register(m)?;
     lcpo::register(m)?;
+    gay_berne::register(m)?;
     custom_gb::register(m)?;
     m.add_class::<PyNonbondedForce>()?;
     m.add_class::<PyCustomExternalForce>()?;
