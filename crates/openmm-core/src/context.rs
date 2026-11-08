@@ -1,3 +1,4 @@
+use crate::forces::alignment::{OrientationRestraintForce, RMSDForce};
 // Context owns the mutable simulation state and drives the MD loop.
 // Generic over burn Backend: NdArray (CPU), Wgpu (GPU), Cuda.
 use burn::prelude::*;
@@ -37,6 +38,7 @@ pub struct Context<B: Backend> {
     device: B::Device,
     constraints: ConstraintSolver,
     masses: Tensor<B, 1>,
+    host_masses: Vec<f64>,
     virtual_sites: VirtualSitePlan,
     molecules: Vec<Vec<usize>>,
 }
@@ -72,7 +74,8 @@ impl<B: Backend> Context<B> {
         let molecules = system.molecules();
         let constraints = ConstraintSolver::new(system.constraints(), &masses)
             .unwrap_or_else(|error| panic!("{error}"));
-        let masses = crate::tensor::from_floats::<B, 1>(masses.as_slice(), &device);
+        let host_masses = masses;
+        let masses = crate::tensor::from_floats::<B, 1>(host_masses.as_slice(), &device);
         let mut parameters = HashMap::new();
         for force in system.forces() {
             for (name, value) in force.global_parameters() {
@@ -98,6 +101,7 @@ impl<B: Backend> Context<B> {
             device,
             constraints,
             masses,
+            host_masses,
             virtual_sites,
             molecules,
         }
@@ -229,6 +233,38 @@ impl<B: Backend> Context<B> {
         if let Some(velocities) = &state.velocities {
             self.velocities = velocities.clone();
         }
+    }
+
+    pub fn update_rmsd_force_parameters(&mut self, force_index: usize, source: &RMSDForce) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<RMSDForce>()
+            .unwrap_or_else(|| panic!("force at index {force_index} is not a RMSDForce"));
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_orientation_restraint_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &OrientationRestraintForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<OrientationRestraintForce>()
+            .unwrap_or_else(|| {
+                panic!("force at index {force_index} is not a OrientationRestraintForce")
+            });
+        target.update_parameters_from(source);
     }
 
     pub fn update_custom_external_force_parameters(
@@ -487,18 +523,22 @@ impl<B: Backend> Context<B> {
         let box_vecs = self
             .periodic_box_vectors
             .or_else(|| self.system.default_periodic_box_vectors().copied());
-        let mut total_forces: Tensor<B, 2> = Tensor::zeros([n, 3], &self.device);
+        let mut total_forces: Option<Tensor<B, 2>> = None;
         let mut total_energy = 0.0f64;
 
         for force in self.system.forces() {
             if let Some((f, e)) =
                 force.calc_forces_and_energy_groups(&self.positions, box_vecs.as_ref(), groups)
             {
-                total_forces = total_forces + f;
+                total_forces = Some(match total_forces {
+                    Some(total) => total + f,
+                    None => f,
+                });
                 total_energy += e;
             }
         }
 
+        let mut total_forces = total_forces.unwrap_or_else(|| Tensor::zeros([n, 3], &self.device));
         self.virtual_sites.distribute_forces(
             self.system.virtual_sites(),
             &self.positions,
@@ -603,37 +643,9 @@ impl<B: Backend> Context<B> {
             None
         };
 
-        // Kinetic energy: E_k = 0.5 * sum(m_i * v_i^2)  [kJ/mol]
-        // Conversion: 1 Da*(nm/ps)^2 = 1 kJ/mol
-        let kinetic_energy = if flags.energy {
-            let n = self.system.num_particles();
-            let masses = self.system.masses();
-            let mass_tensor = crate::tensor::from_floats::<B, 1>(masses.as_slice(), &self.device);
-            let offset = self.integrator.velocity_time_offset();
-            let mut velocities = if offset == 0.0 {
-                self.velocities.clone()
-            } else {
-                self.velocities.clone()
-                    + forces.as_ref().unwrap().clone()
-                        * crate::integrators::inverse_masses(&mass_tensor)
-                        * offset
-            };
-            if offset != 0.0 {
-                self.constraints
-                    .apply_velocities(
-                        &self.positions,
-                        &mut velocities,
-                        self.integrator.constraint_tolerance(),
-                    )
-                    .unwrap_or_else(|error| panic!("{error}"));
-            }
-            let m = mass_tensor.reshape([n, 1]);
-            let v2 = velocities.clone() * velocities;
-            let ek = crate::tensor::scalar((m * v2).sum());
-            Some(0.5 * ek)
-        } else {
-            None
-        };
+        let kinetic_energy = flags
+            .energy
+            .then(|| self.kinetic_energy(forces.as_ref().unwrap()));
 
         State {
             time: self.time,
@@ -653,6 +665,64 @@ impl<B: Backend> Context<B> {
             potential_energy: if flags.energy { potential_energy } else { None },
             kinetic_energy,
         }
+    }
+
+    fn kinetic_energy(&self, forces: &Tensor<B, 2>) -> f64 {
+        let offset = self.integrator.velocity_time_offset();
+        if self.constraints.is_empty() {
+            let kinetic = crate::tensor::with_ndarray_f64(&self.velocities, |velocities| {
+                if offset == 0.0 {
+                    Some(
+                        0.5 * velocities
+                            .chunks_exact(3)
+                            .zip(&self.host_masses)
+                            .map(|(v, &mass)| mass * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]))
+                            .sum::<f64>(),
+                    )
+                } else {
+                    crate::tensor::with_ndarray_f64(forces, |forces| {
+                        let mut total = 0.0;
+                        for ((v, f), &mass) in velocities
+                            .chunks_exact(3)
+                            .zip(forces.chunks_exact(3))
+                            .zip(&self.host_masses)
+                        {
+                            if mass == 0.0 {
+                                continue;
+                            }
+                            let inverse_mass = 1.0 / mass;
+                            let vx = v[0] + f[0] * inverse_mass * offset;
+                            let vy = v[1] + f[1] * inverse_mass * offset;
+                            let vz = v[2] + f[2] * inverse_mass * offset;
+                            total += mass * (vx * vx + vy * vy + vz * vz);
+                        }
+                        0.5 * total
+                    })
+                }
+            })
+            .flatten();
+            if let Some(kinetic) = kinetic {
+                return kinetic;
+            }
+        }
+        let n = self.system.num_particles();
+        let mut velocities = if offset == 0.0 {
+            self.velocities.clone()
+        } else {
+            self.velocities.clone()
+                + forces.clone() * crate::integrators::inverse_masses(&self.masses) * offset
+        };
+        if offset != 0.0 {
+            self.constraints
+                .apply_velocities(
+                    &self.positions,
+                    &mut velocities,
+                    self.integrator.constraint_tolerance(),
+                )
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        let v2 = velocities.clone() * velocities;
+        0.5 * crate::tensor::scalar((self.masses.clone().reshape([n, 1]) * v2).sum())
     }
 
     fn wrapped_positions(&self) -> Tensor<B, 2> {

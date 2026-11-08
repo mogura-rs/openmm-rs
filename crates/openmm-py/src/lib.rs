@@ -1,3 +1,5 @@
+mod collective;
+use collective::{PyCustomVolumeForce, PyOrientationRestraintForce, PyRGForce, PyRMSDForce};
 mod custom_hbond;
 use custom_hbond::PyCustomHbondForce;
 mod custom_centroid;
@@ -1919,6 +1921,18 @@ impl PySystem {
     }
 
     fn add_force(&mut self, force: &Bound<'_, PyAny>) -> PyResult<usize> {
+        if let Ok(force) = force.extract::<PyRef<'_, PyRMSDForce>>() {
+            return Ok(self.inner_mut().add_force(Box::new(force.inner.clone())));
+        }
+        if let Ok(force) = force.extract::<PyRef<'_, PyRGForce>>() {
+            return Ok(self.inner_mut().add_force(Box::new(force.inner.clone())));
+        }
+        if let Ok(force) = force.extract::<PyRef<'_, PyOrientationRestraintForce>>() {
+            return Ok(self.inner_mut().add_force(Box::new(force.inner.clone())));
+        }
+        if let Ok(force) = force.extract::<PyRef<'_, PyCustomVolumeForce>>() {
+            return Ok(self.inner_mut().add_force(Box::new(force.inner.clone())));
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomHbondForce>>() {
             return Ok(self.inner_mut().add_force(Box::new(force.snapshot())));
         }
@@ -2152,6 +2166,16 @@ impl PyContext {
         force_index: usize,
         force: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        if let Ok(force) = force.extract::<PyRef<'_, PyRMSDForce>>() {
+            self.inner
+                .update_rmsd_force_parameters(force_index, &force.inner);
+            return Ok(());
+        }
+        if let Ok(force) = force.extract::<PyRef<'_, PyOrientationRestraintForce>>() {
+            self.inner
+                .update_orientation_restraint_force_parameters(force_index, &force.inner);
+            return Ok(());
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomHbondForce>>() {
             self.inner
                 .update_custom_hbond_force_parameters(force_index, &force.snapshot());
@@ -2285,6 +2309,10 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCustomCompoundBondForce>()?;
     m.add_class::<PyCustomCentroidBondForce>()?;
     m.add_class::<PyCustomHbondForce>()?;
+    m.add_class::<PyRMSDForce>()?;
+    m.add_class::<PyRGForce>()?;
+    m.add_class::<PyOrientationRestraintForce>()?;
+    m.add_class::<PyCustomVolumeForce>()?;
     m.add_class::<PyCustomAngleForce>()?;
     m.add_class::<PyCustomNonbondedForce>()?;
     m.add_class::<PyCMAPTorsionForce>()?;

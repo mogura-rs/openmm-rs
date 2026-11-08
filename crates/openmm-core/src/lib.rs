@@ -50,3 +50,6 @@ pub use forces::custom_compound::CustomCompoundBondForce;
 pub use forces::custom_centroid::CustomCentroidBondForce;
 
 pub use forces::custom_hbond::{CustomHbondForce, CustomHbondMethod};
+
+pub use forces::alignment::{OrientationRestraintForce, RGForce, RMSDForce};
+pub use forces::custom_volume::CustomVolumeForce;

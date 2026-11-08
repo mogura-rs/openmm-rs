@@ -49,7 +49,8 @@ revision in generated validation results.
 | Bonded forces | Partial | Harmonic bonds/angles, periodic/RB torsions and CMAP have analytic forces and reference comparisons; broader API validation and GPU execution remain |
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
-| Custom forces | Partial | Eight force types use compiled expressions and analytic derivatives; nonbonded, compound, centroid and hydrogen bond forces support six table types; periodic external distances and geometric functions are implemented; other force types and broader API coverage remain |
+| Custom forces | Partial | Nine force types use compiled expressions and analytic derivatives; nonbonded, compound, centroid and hydrogen bond forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
+| Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | Thin CPU wrappers exist, but the interface is not yet OpenMM-compatible |
@@ -63,7 +64,7 @@ integrator configurations at four time points, forty-one nonbonded configuration
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
 wrapping configurations, six minimization configurations and 184 custom-expression
-states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states, 864 geometric-expression states, 864 centroid states and 1,296 hydrogen bond states.
+states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states, 864 geometric-expression states, 864 centroid states, 1,296 hydrogen bond states and 336 collective-geometry/volume states.
 Geometric fixtures cover external periodic distances, compound distance/angle/dihedral
 functions, explicit point functions, shared particles, triclinic boxes, nested
 functions, table and bond updates, global parameters, groups and short trajectories.
@@ -73,6 +74,10 @@ Hydrogen bond fixtures cover all three cutoff methods, donor/acceptor parameters
 omitted unused atoms, repeated primary atoms, exclusions, table/global updates,
 triclinic boxes and trajectories. Dihedral fixtures use nondegenerate coordinates;
 the angle and its force are undefined when either defining plane has zero area.
+Collective fixtures cover selected/all particles, proper rotations, reflections,
+deformations, reference/selection changes, restraint strength, massless particles,
+global and box changes, force groups and four-step trajectories. Independent tests
+check energy gradients and known rigid-rotation energies.
 Custom nonbonded fixtures cover all three methods, switching, overlapping and
 empty interaction groups, computed values, table updates, global changes, box
 changes and long-range corrections. Pair forces and energies use strict double
@@ -146,6 +151,26 @@ supplied Lepton optimizer from terminating because NaN is unequal to itself.
 Reference fixtures therefore use defined scalar domains; Rust separately checks
 that unselected branches do not contaminate derivatives.
 
+RMSD and orientation restraint share a quaternion alignment calculation. The
+reference coordinates are centered once per initialization or parameter update;
+clones share immutable coordinate storage. Orientation derivatives use the
+eigenvector sensitivity of the 4-by-4 alignment matrix, contracted before the
+particle loop. These forces and RG use raw coordinates without periodic wrapping.
+CustomVolumeForce evaluates the volume and six independent box components with
+zero particle forces. Its box variables override global parameters with the same
+names, matching Reference.
+
+RMSD computes squared residuals after optimal rotation to avoid cancellation
+between coordinate norms and the largest eigenvalue. It retains the Reference
+zero-force threshold of mean squared deviation below `1e-20`. Exactly rigid
+transformations therefore return zero despite roundoff in the eigensolver.
+The twelve rigid-transform probes return up to `3.97e-8` for Reference RMSD;
+Rust returns zero in each probe. Nonrigid fixtures retain strict tolerances.
+For a collapsed RG selection, Reference returns zero energy and nonfinite forces.
+Rust returns the zero subgradient at that nondifferentiable point; this is a
+compatibility exception. Orientation derivatives require a unique optimal
+rotation; degenerate alignments are outside the differentiable domain.
+
 Pass fixture names to select a focused reference run, for example
 `scripts/validate-reference.sh virtual_sites minimizer`. With no arguments, the
 script runs all fixtures. Minimized endpoints are compared after convergence;
@@ -171,6 +196,32 @@ with OpenMM Reference. Peak process RSS was 7,896, 8,000 and 13,704 KiB,
 respectively. At 768 particles, exhaustive Rust traversal was faster than cells
 (164 versus 150 evaluations/s); cell construction has a cost for small systems.
 These measurements cover the supplied expression and Reference platform only.
+
+`scripts/benchmark-collective.sh` compares Context state requests for both forces
+and energy, including kinetic energy, for RMSD, orientation restraint and RG.
+It runs three process repetitions per implementation and particle count, with
+50,000, 10,000 and 5,000 requests at 512, 4,096 and 13,824 particles.
+Generated summaries include median/range throughput and peak RSS.
+The initial Rust implementation was 4 to 16 times slower than Reference in this
+test. The measurements exposed repeated NdArray copies and reshapes, redundant
+zero-force accumulation and separate temporary tensors for kinetic energy.
+Collective kernels now read CPU storage through views and construct their output
+with its final shape. For unconstrained contiguous f64 CPU states, the shifted
+kinetic energy uses a single reduction over borrowed velocity/force slices.
+Other backends and constrained states retain the tensor calculation.
+
+At 13,824 particles, the three-repetition measurements were:
+
+| Force | Rust median requests/s | Reference median requests/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
+| --- | ---: | ---: | ---: | ---: |
+| RMSD | 3,821 | 1,931 | 9,576 | 10,616 |
+| Orientation restraint | 4,386 | 1,149 | 9,372 | 10,544 |
+| RG | 4,892 | 3,987 | 9,364 | 9,888 |
+
+RSS is the maximum across the three processes. These results use the scripted
+coordinate workload and the Reference platform; they do not establish GPU or
+optimized OpenMM CPU performance. The optimized code passed all 15 reference
+fixtures, 100 Rust tests and a build with the default backend feature disabled.
 
 ## Validation and optimization rules
 

@@ -1,3 +1,4 @@
+pub mod alignment;
 pub mod cmap_torsion;
 pub mod custom_angle;
 pub mod custom_bond;
@@ -8,6 +9,7 @@ pub mod custom_external;
 pub mod custom_hbond;
 pub mod custom_nonbonded;
 pub mod custom_torsion;
+pub mod custom_volume;
 mod ewald;
 pub mod harmonic_angle;
 pub mod harmonic_bond;
