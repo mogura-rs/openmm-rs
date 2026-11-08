@@ -108,7 +108,7 @@ fn nonnegative(value: f64, name: &str) -> PyResult<()> {
 
 macro_rules! integrator_class {
     ($wrapper:ident, $name:literal, $core:ty, {$($methods:tt)*}) => {
-        #[pyclass(unsendable, name = $name)]
+        #[pyclass(unsendable, subclass, name = $name)]
         pub(crate) struct $wrapper {
             inner: Arc<Mutex<$core>>,
             link: ContextLink,
@@ -212,6 +212,24 @@ integrator_class!(
         }
     }
 );
+
+#[pyclass(unsendable, extends=PyLangevinMiddleIntegrator, name="LangevinIntegrator")]
+pub(crate) struct PyLangevinIntegrator;
+
+#[pymethods]
+impl PyLangevinIntegrator {
+    #[new]
+    fn new(
+        temperature: f64,
+        friction: f64,
+        step_size: f64,
+    ) -> PyResult<(Self, PyLangevinMiddleIntegrator)> {
+        Ok((
+            Self,
+            PyLangevinMiddleIntegrator::new(temperature, friction, step_size)?,
+        ))
+    }
+}
 
 integrator_class!(
     PyBrownianIntegrator,
@@ -322,6 +340,7 @@ pub(crate) fn create_context(
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyVerletIntegrator>()?;
     module.add_class::<PyLangevinMiddleIntegrator>()?;
+    module.add_class::<PyLangevinIntegrator>()?;
     module.add_class::<PyBrownianIntegrator>()?;
     for class in [
         module.py().get_type::<PyVerletIntegrator>(),

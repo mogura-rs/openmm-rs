@@ -13,7 +13,8 @@ KB = 1.380649e-23*6.02214076e23/1000
 def make_integrator(om, kind, temperature=0, friction=0.7, dt=0.0002):
     return [lambda: om.VerletIntegrator(dt),
             lambda: om.LangevinMiddleIntegrator(temperature, friction, dt),
-            lambda: om.BrownianIntegrator(temperature, friction, dt)][kind]()
+            lambda: om.BrownianIntegrator(temperature, friction, dt),
+            lambda: om.LangevinIntegrator(temperature, friction, dt)][kind]()
 
 
 def make_system(om, constrained):
@@ -43,7 +44,9 @@ def rejects(callback):
 
 
 def binding_probes(om):
-    for kind in range(3):
+    assert issubclass(om.LangevinIntegrator,om.LangevinMiddleIntegrator)
+    assert type(om.LangevinIntegrator(300,1,0.001)).__name__ == "LangevinIntegrator"
+    for kind in range(4):
         system = om.System()
         system.add_particle(1)
         integrator = make_integrator(om, kind)
@@ -93,7 +96,7 @@ def binding_probes(om):
 
 
 def seed_probes(om):
-    for kind in [1, 2]:
+    for kind in [1, 2, 3]:
         def run(change_seed):
             system = om.System()
             for mass in [1, 2, 3, 0]:
@@ -137,6 +140,27 @@ def seed_probes(om):
         assert (actual.positions, actual.velocities) == (expected.positions, expected.velocities)
 
 
+def langevin_alias_probes(om):
+    for constrained in [False,True]:
+        results=[]
+        for cls in [om.LangevinIntegrator,om.LangevinMiddleIntegrator]:
+            system=make_system(om,constrained)
+            integrator=cls(300,0.7,0.0002)
+            integrator.setRandomNumberSeed(71)
+            context=system.create_context(integrator)
+            context.set_positions([(0,0,0),(1,0,0),(0,0.7,1.1),(0.2,0.4,0.5)])
+            context.set_velocities([(0.2,0.1,-0.1),(-0.3,0.4,0.2),(0.1,-0.2,0.3),(0.7,0.8,0.9)])
+            context.apply_velocity_constraints(1e-10)
+            integrator.step(3)
+            integrator.setTemperature(200)
+            integrator.setFriction(1.3)
+            integrator.setStepSize(0.0001)
+            integrator.step(5)
+            state=context.get_state(positions=True,velocities=True,energy=True)
+            results.append((state.positions,state.velocities,state.potential_energy,state.kinetic_energy,state.time,state.step_count))
+        assert results[0]==results[1]
+
+
 def check_moments(moments, samples, label):
     for value, target, variance in zip(moments, [0, 1, 3], [1, 2, 96]):
         assert abs(value-target) < 6*math.sqrt(variance/samples), (label, moments, samples)
@@ -144,12 +168,12 @@ def check_moments(moments, samples, label):
 
 def statistics(om, rows):
     reports = []
-    for kind in [1, 2]:
+    for kind in [1, 2, 3]:
         n = 12000
         system = om.System()
         for i in range(n):
             system.add_particle(1+i%5)
-        integrator = make_integrator(om, kind, temperature=1, friction=1e6 if kind == 1 else 0.7, dt=0.001)
+        integrator = make_integrator(om, kind, temperature=1, friction=1e6 if kind in [1, 3] else 0.7, dt=0.001)
         context = om.Context(system, integrator)
         for phase, temperature in enumerate([100, 500, 200]):
             source = next(r for r in rows if r["kind"] == kind and r["phase"] == phase)
@@ -183,7 +207,7 @@ def main():
     spec.loader.exec_module(om)
     rows = [json.loads(line) for line in args.reference.read_text().splitlines()]
     fixtures = [row for row in rows if not row.get("statistic")]
-    assert len(fixtures) == 72 and len(rows) == 78
+    assert len(fixtures) == 96 and len(rows) == 105
     errors = {key: [] for key in ["energy", "kinetic", "time", "force", "position", "velocity"]}
     previous = None
     for f in fixtures:
@@ -232,6 +256,7 @@ def main():
                 key, f["phase"], f["steps"], metric, got, want)
             errors[metric].append(abs(got-want))
     binding_probes(om)
+    langevin_alias_probes(om)
     seed_probes(om)
     reports = statistics(om, [row for row in rows if row.get("statistic")])
     print(json.dumps({"status": "passed", "fixtures": len(fixtures), "binding_probes": "passed",

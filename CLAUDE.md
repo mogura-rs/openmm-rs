@@ -144,7 +144,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - `HarmonicAngleForce` — analytic forces + PBC
 - `PeriodicTorsionForce` — Blondel-Karplus formula + PBC
 - `VerletIntegrator` — leapfrog
-- `LangevinMiddleIntegrator` — LFMiddle splitting
+- `LangevinMiddleIntegrator` and `LangevinIntegrator` — LFMiddle splitting
 - `BrownianIntegrator` — overdamped Langevin
 - CPU stochastic integration — direct f64 state updates and per-integrator seeded random streams
 - `NonbondedForce` — cutoff/reaction field, Ewald, PME, LJPME, parameter offsets, switching and dispersion correction

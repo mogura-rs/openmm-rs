@@ -3,6 +3,7 @@
 #include <openmm/CustomExternalForce.h>
 #include <openmm/HarmonicBondForce.h>
 #include <openmm/LangevinMiddleIntegrator.h>
+#include <openmm/LangevinIntegrator.h>
 #include <openmm/Platform.h>
 #include <openmm/System.h>
 #include <openmm/VerletIntegrator.h>
@@ -36,6 +37,7 @@ void run(int kind, bool constrained) {
     std::unique_ptr<Integrator> integrator;
     if(kind==0)integrator=std::make_unique<VerletIntegrator>(0.0002);
     else if(kind==1)integrator=std::make_unique<LangevinMiddleIntegrator>(0,0.7,0.0002);
+    else if(kind==3)integrator=std::make_unique<LangevinIntegrator>(0,0.7,0.0002);
     else integrator=std::make_unique<BrownianIntegrator>(0,0.7,0.0002);
     Context context(system,*integrator,Platform::getPlatformByName("Reference"));
     context.setPositions({Vec3(0,0,0),Vec3(1,0,0),Vec3(0,0.7,1.1),Vec3(0.2,0.4,0.5)});
@@ -51,7 +53,7 @@ void run(int kind, bool constrained) {
         context.getIntegrator().setStepSize(dt[phase]);
         integrator->setIntegrationForceGroups(masks[phase]);
         integrator->setConstraintTolerance(tolerance[phase]);
-        if(kind==1)dynamic_cast<LangevinMiddleIntegrator&>(*integrator).setFriction(friction[phase]);
+        if(kind==1 || kind==3)dynamic_cast<LangevinMiddleIntegrator&>(*integrator).setFriction(friction[phase]);
         if(kind==2)dynamic_cast<BrownianIntegrator&>(*integrator).setFriction(friction[phase]);
         int completed=0;
         for(int steps : {0,1,4}) {
@@ -76,11 +78,12 @@ void statistics(int kind) {
     for(int i=0;i<n;++i)system.addParticle(1+i%5);
     std::unique_ptr<Integrator> integrator;
     if(kind==1)integrator=std::make_unique<LangevinMiddleIntegrator>(1,1e6,0.001);
+    else if(kind==3)integrator=std::make_unique<LangevinIntegrator>(1,1e6,0.001);
     else integrator=std::make_unique<BrownianIntegrator>(1,0.7,0.001);
     Context context(system,*integrator,Platform::getPlatformByName("Reference"));
     int phase=0;
     for(double temperature : {100.,500.,200.}) {
-        if(kind==1)dynamic_cast<LangevinMiddleIntegrator&>(*integrator).setTemperature(temperature);
+        if(kind==1 || kind==3)dynamic_cast<LangevinMiddleIntegrator&>(*integrator).setTemperature(temperature);
         else dynamic_cast<BrownianIntegrator&>(*integrator).setTemperature(temperature);
         context.setPositions(std::vector<Vec3>(n));
         context.setVelocities(std::vector<Vec3>(n));
@@ -104,8 +107,8 @@ std::vector<Vec3> seededRun(int kind, int changeSeed) {
     System system;
     for(double mass : {1.,2.,3.,0.})system.addParticle(mass);
     std::unique_ptr<Integrator> integrator;
-    if(kind==1) {
-        auto* value=new LangevinMiddleIntegrator(300,0.7,0.0002);
+    if(kind==1 || kind==3) {
+        LangevinMiddleIntegrator* value=kind==1?new LangevinMiddleIntegrator(300,0.7,0.0002):new LangevinIntegrator(300,0.7,0.0002);
         value->setRandomNumberSeed(-17);integrator.reset(value);
     } else {
         auto* value=new BrownianIntegrator(300,0.7,0.0002);
@@ -114,12 +117,12 @@ std::vector<Vec3> seededRun(int kind, int changeSeed) {
     Context context(system,*integrator,Platform::getPlatformByName("Reference"));
     context.setPositions(std::vector<Vec3>(4));
     if(changeSeed==1) {
-        if(kind==1)dynamic_cast<LangevinMiddleIntegrator&>(*integrator).setRandomNumberSeed(31);
+        if(kind==1 || kind==3)dynamic_cast<LangevinMiddleIntegrator&>(*integrator).setRandomNumberSeed(31);
         else dynamic_cast<BrownianIntegrator&>(*integrator).setRandomNumberSeed(31);
     }
     integrator->step(1);
     if(changeSeed==2) {
-        if(kind==1)dynamic_cast<LangevinMiddleIntegrator&>(*integrator).setRandomNumberSeed(31);
+        if(kind==1 || kind==3)dynamic_cast<LangevinMiddleIntegrator&>(*integrator).setRandomNumberSeed(31);
         else dynamic_cast<BrownianIntegrator&>(*integrator).setRandomNumberSeed(31);
     }
     integrator->step(3);
@@ -127,7 +130,7 @@ std::vector<Vec3> seededRun(int kind, int changeSeed) {
 }
 
 int main() {
-    for(int kind : {1,2}) {
+    for(int kind : {1,2,3}) {
         auto original=seededRun(kind,0);
         for(int mode : {1,2}) {
             auto changed=seededRun(kind,mode);
@@ -137,6 +140,6 @@ int main() {
     }
 
     std::cout << std::setprecision(17);
-    for(int kind=0;kind<3;++kind)for(bool constrained : {false,true})run(kind,constrained);
-    statistics(1);statistics(2);
+    for(int kind=0;kind<4;++kind)for(bool constrained : {false,true})run(kind,constrained);
+    statistics(1);statistics(2);statistics(3);
 }

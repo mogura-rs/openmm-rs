@@ -266,6 +266,9 @@ pub fn gaussian_noise<B: Backend>(shape: [usize; 2], device: &B::Device) -> Tens
     Tensor::random(shape, burn::tensor::Distribution::Normal(0.0, 1.0), device)
 }
 
+/// Historical name for the LFMiddle integrator.
+pub type LangevinIntegrator = LangevinMiddleIntegrator;
+
 #[cfg(test)]
 mod tests {
     use super::*;

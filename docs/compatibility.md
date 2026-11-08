@@ -247,7 +247,7 @@ removal. Retained Python force references remain valid after their owner is remo
 or deleted and may be attached again; this is a safe lifetime extension over the
 reference wrapper, whose underlying C++ object is deleted.
 
-Python Verlet, LFMiddle and Brownian integrators share their settings with their
+Python Verlet, Langevin, LFMiddle and Brownian integrators share their settings with their
 bound Context. Step size, tolerance, force-group masks, temperature and friction
 setters affect subsequent execution and state queries. `Context(system, integrator)`
 and `system.create_context(integrator)` retain the original System and Integrator;
@@ -257,6 +257,10 @@ second Context. The integrator uses a weak link to the Context, so keeping the
 integrator does not create a reference cycle. Dropping the Context releases the
 binding; stepping an unbound integrator raises an error, and rebinding after
 release is a safe lifetime extension.
+`LangevinIntegrator` inherits the LFMiddle implementation, matching the supplied
+source. Rust exposes a type alias; Python exposes a subclass that shares all live
+settings and binding behavior. Seeded Rust trajectories are also compared between
+the two names, with and without constraints.
 LFMiddle and Brownian capture a per-integrator ChaCha12 random stream at Context
 initialization. Nonzero seeds reproduce Rust runs independently of how other
 Contexts are stepped; seed zero uses OS entropy. Changing the seed afterward,
@@ -283,9 +287,9 @@ naming/signature coverage. Inputs retain the core's finite-value checks: timeste
 and Brownian friction must be positive, and constraint tolerance must be between
 zero and one. The source accepts some boundary values outside this supported
 domain; error and boundary compatibility remain incomplete.
-Reference fixtures cover 72 states with changing settings, all three integrators,
+Reference fixtures cover 96 states with changing settings, all four integrators,
 constraints, fixed particles and kinetic energy. Temperature changes are checked
-independently for LFMiddle and Brownian using 36,000 normalized velocity components
+independently for Langevin, LFMiddle and Brownian using 36,000 normalized velocity components
 at each of three temperatures. Both implementations must satisfy six-standard-error
 bounds for the first, second and fourth Gaussian moments. Random paths are not
 compared across implementations. Python probes check double binding, retained
