@@ -4,6 +4,7 @@ pub mod custom_angle;
 pub mod custom_bond;
 pub mod custom_centroid;
 pub mod custom_compound;
+pub mod custom_cv;
 mod custom_evaluator;
 pub mod custom_external;
 pub mod custom_hbond;
@@ -88,6 +89,27 @@ pub trait ForceClone<B: Backend> {
     fn clone_box(&self) -> Box<dyn Force<B>>;
 }
 
+type HostAccumulator<'a> = Box<dyn FnOnce(f64, &mut [f64]) + 'a>;
+
+/// An energy value and deferred addition of its scaled host forces.
+pub struct HostForceEvaluation<'a> {
+    pub energy: f64,
+    accumulate: HostAccumulator<'a>,
+}
+
+impl<'a> HostForceEvaluation<'a> {
+    pub fn new(energy: f64, accumulate: impl FnOnce(f64, &mut [f64]) + 'a) -> Self {
+        Self {
+            energy,
+            accumulate: Box::new(accumulate),
+        }
+    }
+
+    pub fn accumulate(self, coefficient: f64, forces: &mut [f64]) {
+        (self.accumulate)(coefficient, forces);
+    }
+}
+
 impl<B: Backend, T> ForceClone<B> for T
 where
     T: 'static + Force<B> + Clone,
@@ -134,6 +156,16 @@ pub trait Force<B: Backend>: Send + Sync + AsAny + ForceClone<B> {
         positions: &Tensor<B, 2>,
         box_vectors: Option<&[[f64; 3]; 3]>,
     ) -> (Tensor<B, 2>, f64);
+
+    /// Optionally evaluate energy and prepare direct host force accumulation.
+    /// The caller may drop the result if it needs only energy.
+    fn prepare_host_evaluation<'a>(
+        &'a self,
+        _positions: &'a Tensor<B, 2>,
+        _box_vectors: Option<&'a [[f64; 3]; 3]>,
+    ) -> Option<HostForceEvaluation<'a>> {
+        None
+    }
 
     fn uses_periodic_boundary_conditions(&self) -> bool {
         false

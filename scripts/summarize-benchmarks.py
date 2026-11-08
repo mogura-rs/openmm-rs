@@ -30,7 +30,7 @@ def main():
     for particles, records in groups.items():
         implementations = {}
         for record in records:
-            key = "/".join(str(record[field]) for field in ["implementation", "api", "traversal"] if field in record)
+            key = "/".join(str(record[field]) for field in ["implementation", "api", "traversal", "cache_mode"] if field in record)
             implementations.setdefault(key, []).append(record)
         summaries[particles] = {
             key: {"samples": len(rows),

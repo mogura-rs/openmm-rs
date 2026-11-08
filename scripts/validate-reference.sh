@@ -5,13 +5,13 @@ cd "$(dirname "$0")/.."
 reference_source="${OPENMM_SOURCE:-../openmm}"
 reference_build="target/reference-openmm"
 jobs="${SLURM_CPUS_PER_TASK:-4}"
-fixtures=(integrators nonbonded virtual_sites bonded groups molecules minimizer custom tables cmap custom_nonbonded geometry centroid hbond collective)
+fixtures=(integrators nonbonded virtual_sites bonded groups molecules minimizer custom tables cmap custom_nonbonded geometry centroid hbond collective cv)
 if [[ $# -gt 0 ]]; then
     fixtures=("$@")
 fi
 for fixture in "${fixtures[@]}"; do
     case "$fixture" in
-        integrators|nonbonded|virtual_sites|bonded|groups|molecules|minimizer|custom|tables|cmap|custom_nonbonded|geometry|centroid|hbond|collective) ;;
+        integrators|nonbonded|virtual_sites|bonded|groups|molecules|minimizer|custom|tables|cmap|custom_nonbonded|geometry|centroid|hbond|collective|cv) ;;
         *) echo "Unknown reference fixture: $fixture" >&2; exit 2 ;;
     esac
 done

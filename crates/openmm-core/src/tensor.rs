@@ -6,7 +6,31 @@ pub fn from_floats<B: Backend, const D: usize>(
     data: impl Into<TensorData>,
     device: &B::Device,
 ) -> Tensor<B, D> {
-    Tensor::from_data(data.into().convert::<B::FloatElem>(), device)
+    let primitive =
+        Tensor::<B, D>::from_data(data.into().convert::<B::FloatElem>(), device).into_primitive();
+    #[cfg(feature = "ndarray")]
+    let primitive = {
+        use burn::backend::ndarray::NdArrayTensor;
+        use burn::tensor::TensorPrimitive;
+        use std::any::Any;
+        let mut primitive = primitive;
+        if let TensorPrimitive::Float(raw) = &mut primitive {
+            if let Some(array) = (raw as &mut dyn Any).downcast_mut::<NdArrayTensor>() {
+                // Native TensorData bytes clone their allocation; ArcArray clones share it.
+                match array {
+                    NdArrayTensor::F64(storage) if storage.is_borrowed() => {
+                        *array = storage.view().to_owned().into_shared().into();
+                    }
+                    NdArrayTensor::F32(storage) if storage.is_borrowed() => {
+                        *array = storage.view().to_owned().into_shared().into();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        primitive
+    };
+    Tensor::from_primitive(primitive)
 }
 
 pub(crate) fn scalar<B: Backend>(value: Tensor<B, 1>) -> f64 {
@@ -46,6 +70,22 @@ pub(crate) fn from_f64_vec<B: Backend, const D: usize>(
     shape: [usize; D],
     device: &B::Device,
 ) -> Tensor<B, D> {
+    #[cfg(feature = "ndarray")]
+    {
+        use burn::backend::ndarray::NdArrayTensor;
+        use burn::tensor::TensorPrimitive;
+        use std::any::{Any, TypeId};
+        if TypeId::of::<B::FloatTensorPrimitive>() == TypeId::of::<NdArrayTensor>()
+            && TypeId::of::<B::FloatElem>() == TypeId::of::<f64>()
+        {
+            let array = ndarray::Array::from_shape_vec(ndarray::IxDyn(&shape), values)
+                .expect("tensor data length must match its shape")
+                .into_shared();
+            let primitive: Box<dyn Any> = Box::new(NdArrayTensor::from(array));
+            let primitive = *primitive.downcast::<B::FloatTensorPrimitive>().unwrap();
+            return Tensor::from_primitive(TensorPrimitive::Float(primitive));
+        }
+    }
     from_floats(TensorData::new(values, shape), device)
 }
 
@@ -65,6 +105,15 @@ pub(crate) fn with_ndarray_f64<B: Backend, const D: usize, R>(
         }
     }
     None
+}
+
+pub(crate) fn with_f64_data<B: Backend, const D: usize, R>(
+    tensor: &Tensor<B, D>,
+    read: impl FnOnce(&[f64]) -> R,
+) -> R {
+    let mut read = Some(read);
+    with_ndarray_f64(tensor, |data| read.take().unwrap()(data))
+        .unwrap_or_else(|| read.take().unwrap()(&to_f64_vec(tensor)))
 }
 
 #[cfg(all(test, feature = "ndarray"))]

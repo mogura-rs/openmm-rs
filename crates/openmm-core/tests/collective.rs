@@ -141,3 +141,36 @@ fn volume_energy_uses_box_variables_after_global_bindings() {
             < 1e-14
     );
 }
+
+#[test]
+fn single_precision_collective_forces_match_rounded_double_coordinates() {
+    fn compare<F: Force<NdArray<f32>> + Force<NdArray<f64>>>(mut force: F) {
+        let values: Vec<f32> = rotated(true).into_iter().map(|v| v as f32).collect();
+        let single =
+            from_floats::<NdArray<f32>, 1>(values.as_slice(), &Default::default()).reshape([5, 3]);
+        let doubles: Vec<f64> = values.iter().map(|&v| f64::from(v)).collect();
+        <F as Force<NdArray<f32>>>::initialize(&mut force, 5, None);
+        let (single, e_single) =
+            <F as Force<NdArray<f32>>>::calc_forces_and_energy(&force, &single, None);
+        <F as Force<NdArray<f64>>>::initialize(&mut force, 5, None);
+        let (double, e_double) =
+            <F as Force<NdArray<f64>>>::calc_forces_and_energy(&force, &tensor(&doubles), None);
+        assert!((e_single - e_double).abs() < 1e-14);
+        for (a, b) in single
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .zip(double.to_data().to_vec::<f64>().unwrap())
+        {
+            assert!((f64::from(*a) - b).abs() < 2e-7);
+        }
+    }
+    compare(RMSDForce::new(reference(), vec![0, 1, 2, 3]));
+    compare(RGForce::new(vec![0, 1, 2, 3]));
+    compare(OrientationRestraintForce::new(
+        1.7,
+        reference(),
+        vec![0, 1, 2, 3],
+    ));
+}

@@ -34,6 +34,20 @@ fn center(positions: &[f64], particles: &[usize]) -> Vector3<f64> {
     result / particles.len() as f64
 }
 
+fn scale_forces(forces: &mut [f64], particles: &[usize], scale: f64) {
+    if particles.len() * 3 == forces.len() {
+        for value in forces {
+            *value *= scale;
+        }
+    } else {
+        for &particle in particles {
+            for value in &mut forces[3 * particle..3 * particle + 3] {
+                *value *= scale;
+            }
+        }
+    }
+}
+
 fn quaternion_matrix(r: &Matrix3<f64>) -> Matrix4<f64> {
     Matrix4::new(
         r[(0, 0)] + r[(1, 1)] + r[(2, 2)],
@@ -190,38 +204,38 @@ impl<B: Backend> Force<B> for RMSDForce {
         _vectors: Option<&[[f64; 3]; 3]>,
     ) -> (Tensor<B, 2>, f64) {
         let n = positions.dims()[0];
-        let pos = crate::tensor::to_f64_vec(positions);
-        let (center, eig, index) = self.reference.alignment(&pos);
-        let q = eig.eigenvectors.column(index).into_owned();
-        let rotation = rotation(&q);
-        let mut forces = vec![0.0; 3 * n];
-        let mut residual = 0.0;
-        for (&p, reference) in self
-            .reference
-            .selected
-            .iter()
-            .zip(self.reference.centered.iter())
-        {
-            let delta =
-                Vector3::from_column_slice(&pos[3 * p..3 * p + 3]) - center - rotation * reference;
-            residual += delta.norm_squared();
-            forces[3 * p..3 * p + 3].copy_from_slice(delta.as_slice());
-        }
-        let count = self.reference.selected.len() as f64;
-        let msd = residual / count;
-        let rmsd = if msd < 1e-20 { 0.0 } else { msd.sqrt() };
-        if rmsd == 0.0 {
-            forces.fill(0.0);
-        } else {
-            let scale = -1.0 / (count * rmsd);
-            for value in &mut forces {
-                *value *= scale;
+        crate::tensor::with_f64_data(positions, |pos| {
+            let (center, eig, index) = self.reference.alignment(pos);
+            let q = eig.eigenvectors.column(index).into_owned();
+            let rotation = rotation(&q);
+            let mut forces = vec![0.0; 3 * n];
+            let mut residual = 0.0;
+            for (&p, reference) in self
+                .reference
+                .selected
+                .iter()
+                .zip(self.reference.centered.iter())
+            {
+                let delta = Vector3::from_column_slice(&pos[3 * p..3 * p + 3])
+                    - center
+                    - rotation * reference;
+                residual += delta.norm_squared();
+                forces[3 * p..3 * p + 3].copy_from_slice(delta.as_slice());
             }
-        }
-        (
-            crate::tensor::from_f64_vec(forces, [n, 3], &positions.device()),
-            rmsd,
-        )
+            let count = self.reference.selected.len() as f64;
+            let msd = residual / count;
+            let rmsd = if msd < 1e-20 { 0.0 } else { msd.sqrt() };
+            if rmsd == 0.0 {
+                forces.fill(0.0);
+            } else {
+                let scale = -1.0 / (count * rmsd);
+                scale_forces(&mut forces, &self.reference.selected, scale);
+            }
+            (
+                crate::tensor::from_f64_vec(forces, [n, 3], &positions.device()),
+                rmsd,
+            )
+        })
     }
 }
 
@@ -262,43 +276,44 @@ impl<B: Backend> Force<B> for OrientationRestraintForce {
         _vectors: Option<&[[f64; 3]; 3]>,
     ) -> (Tensor<B, 2>, f64) {
         let n = positions.dims()[0];
-        let pos = crate::tensor::to_f64_vec(positions);
-        let (_, eig, index) = self.reference.alignment(&pos);
-        let q = eig.eigenvectors.column(index).into_owned();
-        let energy = 2.0 * self.k * (1.0 - q[0] * q[0]);
-        let mut forces = vec![0.0; 3 * n];
-        if q[0] * q[0] < 1.0 {
-            let mut sensitivity = Vector4::zeros();
-            for other in 0..4 {
-                if other != index {
-                    sensitivity += eig.eigenvectors.column(other)
-                        * (eig.eigenvectors[(0, other)]
-                            / (eig.eigenvalues[index] - eig.eigenvalues[other]));
+        crate::tensor::with_f64_data(positions, |pos| {
+            let (_, eig, index) = self.reference.alignment(pos);
+            let q = eig.eigenvectors.column(index).into_owned();
+            let energy = 2.0 * self.k * (1.0 - q[0] * q[0]);
+            let mut forces = vec![0.0; 3 * n];
+            if q[0] * q[0] < 1.0 {
+                let mut sensitivity = Vector4::zeros();
+                for other in 0..4 {
+                    if other != index {
+                        sensitivity += eig.eigenvectors.column(other)
+                            * (eig.eigenvectors[(0, other)]
+                                / (eig.eigenvalues[index] - eig.eigenvalues[other]));
+                    }
+                }
+                let mut gradient = Matrix3::zeros();
+                for ref_axis in 0..3 {
+                    for axis in 0..3 {
+                        let mut basis = Matrix3::zeros();
+                        basis[(ref_axis, axis)] = 1.0;
+                        gradient[(axis, ref_axis)] =
+                            4.0 * self.k * q[0] * sensitivity.dot(&(quaternion_matrix(&basis) * q));
+                    }
+                }
+                for (&p, reference) in self
+                    .reference
+                    .selected
+                    .iter()
+                    .zip(self.reference.centered.iter())
+                {
+                    let force = gradient * reference;
+                    forces[3 * p..3 * p + 3].copy_from_slice(force.as_slice());
                 }
             }
-            let mut gradient = Matrix3::zeros();
-            for ref_axis in 0..3 {
-                for axis in 0..3 {
-                    let mut basis = Matrix3::zeros();
-                    basis[(ref_axis, axis)] = 1.0;
-                    gradient[(axis, ref_axis)] =
-                        4.0 * self.k * q[0] * sensitivity.dot(&(quaternion_matrix(&basis) * q));
-                }
-            }
-            for (&p, reference) in self
-                .reference
-                .selected
-                .iter()
-                .zip(self.reference.centered.iter())
-            {
-                let force = gradient * reference;
-                forces[3 * p..3 * p + 3].copy_from_slice(force.as_slice());
-            }
-        }
-        (
-            crate::tensor::from_f64_vec(forces, [n, 3], &positions.device()),
-            energy,
-        )
+            (
+                crate::tensor::from_f64_vec(forces, [n, 3], &positions.device()),
+                energy,
+            )
+        })
     }
 }
 
@@ -327,11 +342,63 @@ impl RGForce {
     pub fn uses_periodic_boundary_conditions(&self) -> bool {
         false
     }
+
+    fn prepare_host(&self, positions: &[f64]) -> (Vector3<f64>, f64) {
+        assert!(
+            !self.selected.is_empty(),
+            "RG force has not been initialized"
+        );
+        let center = center(positions, &self.selected);
+        let mut squared = 0.0;
+        for &p in self.selected.iter() {
+            let delta = Vector3::from_column_slice(&positions[3 * p..3 * p + 3]) - center;
+            squared += delta.norm_squared();
+        }
+        let count = self.selected.len() as f64;
+        let rg = (squared / count).sqrt();
+        (center, rg)
+    }
+
+    fn accumulate_host(
+        &self,
+        positions: &[f64],
+        center: Vector3<f64>,
+        rg: f64,
+        coefficient: f64,
+        total: &mut [f64],
+    ) {
+        assert_eq!(total.len(), positions.len(), "force buffer shape mismatch");
+        if rg > 0.0 {
+            let scale = -coefficient / (self.selected.len() as f64 * rg);
+            for &p in self.selected.iter() {
+                let delta = Vector3::from_column_slice(&positions[3 * p..3 * p + 3]) - center;
+                for axis in 0..3 {
+                    total[3 * p + axis] += scale * delta[axis];
+                }
+            }
+        }
+    }
 }
 impl<B: Backend> Force<B> for RGForce {
     super::force_metadata_impl!();
     fn initialize(&mut self, n: usize, _vectors: Option<&[[f64; 3]; 3]>) {
         self.selected = select_particles(&self.particles, n).into();
+    }
+    fn prepare_host_evaluation<'a>(
+        &'a self,
+        positions: &'a Tensor<B, 2>,
+        _vectors: Option<&'a [[f64; 3]; 3]>,
+    ) -> Option<super::HostForceEvaluation<'a>> {
+        let (center, rg) =
+            crate::tensor::with_f64_data(positions, |positions| self.prepare_host(positions));
+        Some(super::HostForceEvaluation::new(
+            rg,
+            move |coefficient, total| {
+                crate::tensor::with_f64_data(positions, |positions| {
+                    self.accumulate_host(positions, center, rg, coefficient, total);
+                });
+            },
+        ))
     }
     fn calc_forces_and_energy(
         &self,
@@ -343,26 +410,25 @@ impl<B: Backend> Force<B> for RGForce {
             "RG force has not been initialized"
         );
         let n = positions.dims()[0];
-        let pos = crate::tensor::to_f64_vec(positions);
-        let center = center(&pos, &self.selected);
-        let mut forces = vec![0.0; 3 * n];
-        let mut squared = 0.0;
-        for &p in self.selected.iter() {
-            let delta = Vector3::from_column_slice(&pos[3 * p..3 * p + 3]) - center;
-            squared += delta.norm_squared();
-            forces[3 * p..3 * p + 3].copy_from_slice(delta.as_slice());
-        }
-        let count = self.selected.len() as f64;
-        let rg = (squared / count).sqrt();
-        if rg > 0.0 {
-            let scale = -1.0 / (count * rg);
-            for force in &mut forces {
-                *force *= scale;
+        crate::tensor::with_f64_data(positions, |pos| {
+            let center = center(pos, &self.selected);
+            let mut forces = vec![0.0; 3 * n];
+            let mut squared = 0.0;
+            for &p in self.selected.iter() {
+                let delta = Vector3::from_column_slice(&pos[3 * p..3 * p + 3]) - center;
+                squared += delta.norm_squared();
+                forces[3 * p..3 * p + 3].copy_from_slice(delta.as_slice());
             }
-        }
-        (
-            crate::tensor::from_f64_vec(forces, [n, 3], &positions.device()),
-            rg,
-        )
+            let count = self.selected.len() as f64;
+            let rg = (squared / count).sqrt();
+            if rg > 0.0 {
+                let scale = -1.0 / (count * rg);
+                scale_forces(&mut forces, &self.selected, scale);
+            }
+            (
+                crate::tensor::from_f64_vec(forces, [n, 3], &positions.device()),
+                rg,
+            )
+        })
     }
 }

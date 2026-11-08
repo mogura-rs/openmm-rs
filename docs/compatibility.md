@@ -49,7 +49,7 @@ revision in generated validation results.
 | Bonded forces | Partial | Harmonic bonds/angles, periodic/RB torsions and CMAP have analytic forces and reference comparisons; broader API validation and GPU execution remain |
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
-| Custom forces | Partial | Nine force types use compiled expressions and analytic derivatives; nonbonded, compound, centroid and hydrogen bond forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
+| Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
@@ -64,7 +64,7 @@ integrator configurations at four time points, forty-one nonbonded configuration
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
 wrapping configurations, six minimization configurations and 184 custom-expression
-states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states, 864 geometric-expression states, 864 centroid states, 1,296 hydrogen bond states and 336 collective-geometry/volume states.
+states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states, 864 geometric-expression states, 864 centroid states, 1,296 hydrogen bond states, 336 collective-geometry/volume states and 360 composite-CV states in two force-cache modes.
 Geometric fixtures cover external periodic distances, compound distance/angle/dihedral
 functions, explicit point functions, shared particles, triclinic boxes, nested
 functions, table and bond updates, global parameters, groups and short trajectories.
@@ -78,6 +78,9 @@ Collective fixtures cover selected/all particles, proper rotations, reflections,
 deformations, reference/selection changes, restraint strength, massless particles,
 global and box changes, force groups and four-step trajectories. Independent tests
 check energy gradients and known rigid-rotation energies.
+Composite-CV fixtures combine bonds, RG, RMSD, orientation, PME, volume and nested
+CV forces. They compare inherited and outer parameters, registered derivatives,
+table updates, explicit child-force updates, periodic boxes and short trajectories.
 Custom nonbonded fixtures cover all three methods, switching, overlapping and
 empty interaction groups, computed values, table updates, global changes, box
 changes and long-range corrections. Pair forces and energies use strict double
@@ -143,6 +146,32 @@ uses primary donor/acceptor atoms and cell storage without a dense pair matrix.
 An exhaustive traversal option supports numerical checks. Unused secondary atoms
 may be omitted; expressions that reference an omitted atom are rejected explicitly.
 Context updates preserve particle membership, exclusions, methods and cutoffs.
+CustomCVForce composes up to 32 force energies with analytic chain-rule forces,
+tabulated functions and registered parameter derivatives. Child parameters are
+shared with the outer Context, and outer defaults override consistent child
+defaults. Child parameter derivatives are included only when the parent has
+registered at least one derivative, matching the supplied Reference implementation.
+Updating the parent copies tables only. Explicit Rust/Python Context updates can
+address a child through a sequence of force indices; nested paths are supported.
+The OpenMM `getInnerContext()` API and a compatible Python Context view remain
+unimplemented. Python retains the original child objects and snapshots them when
+creating or updating the Context; changing a child object alone does not update a
+running Context.
+
+CV force tensors use a configurable cache with a default 16 MiB payload limit.
+The cache retains all child tensors when their estimated payload fits, otherwise
+it recomputes them after evaluating the outer expression. This is an upper bound
+on cached force payload, not total process memory. Zero disables caching; the
+largest `usize` value removes the payload limit. On the f64 CPU backend, RG child
+forces add directly into the parent buffer and bypass dense child tensors in all
+cache modes. Other children retain tensor evaluation, and other backends retain
+tensor force accumulation. Energy-only RG requests do not allocate force arrays.
+RG preparation retains the center and radius until the outer expression supplies
+its chain-rule coefficient, avoiding a second geometry calculation. The tensor
+construction helper promotes native CPU input bytes to shared array storage;
+otherwise Burn's byte storage can copy the full tensor when it is cloned for a
+read. An allocation regression test bounds large allocations independently of
+the number of RG variables and checks all three cache settings.
 Geometric angle derivatives retain the reference cross-product norm floor of
 `1e-6`; this regularizes nearly collinear angles and differs from the exact energy
 gradient below that threshold. Coincident-point distance derivatives are zero.
@@ -206,7 +235,9 @@ The initial Rust implementation was 4 to 16 times slower than Reference in this
 test. The measurements exposed repeated NdArray copies and reshapes, redundant
 zero-force accumulation and separate temporary tensors for kinetic energy.
 Collective kernels now read CPU storage through views and construct their output
-with its final shape. For unconstrained contiguous f64 CPU states, the shifted
+with its final shape. Native f64 output vectors transfer ownership into shared
+arrays, and the initial Context coordinates and velocities use shared storage.
+For unconstrained contiguous f64 CPU states, the shifted
 kinetic energy uses a single reduction over borrowed velocity/force slices.
 Other backends and constrained states retain the tensor calculation.
 
@@ -214,14 +245,37 @@ At 13,824 particles, the three-repetition measurements were:
 
 | Force | Rust median requests/s | Reference median requests/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
 | --- | ---: | ---: | ---: | ---: |
-| RMSD | 3,821 | 1,931 | 9,576 | 10,616 |
-| Orientation restraint | 4,386 | 1,149 | 9,372 | 10,544 |
-| RG | 4,892 | 3,987 | 9,364 | 9,888 |
+| RMSD | 5,237 | 1,926 | 9,188 | 10,612 |
+| Orientation restraint | 6,334 | 1,152 | 9,196 | 10,896 |
+| RG | 7,623 | 3,995 | 8,388 | 9,892 |
 
 RSS is the maximum across the three processes. These results use the scripted
 coordinate workload and the Reference platform; they do not establish GPU or
-optimized OpenMM CPU performance. The optimized code passed all 15 reference
-fixtures, 100 Rust tests and a build with the default backend feature disabled.
+optimized OpenMM CPU performance. The optimized code passed all 16 reference
+fixtures with 468,431 scalar comparisons, 107 Rust tests and a build with the
+default backend feature disabled.
+
+`scripts/benchmark-cv.sh` measures a weighted mean of disjoint RG selections,
+squared by a CustomCVForce. Both implementations request Context forces and
+energy, including kinetic energy. It runs 5,000 requests at 4,096 particles and
+300 at 65,536 particles, with three process repetitions for every configuration.
+The default bounded cache measurements were:
+
+| Particles | CVs | Rust median requests/s | Reference median requests/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 4,096 | 2 | 20,799 | 8,433.6 | 5,328 | 8,884 |
+| 4,096 | 8 | 17,174 | 2,219.6 | 5,316 | 9,332 |
+| 4,096 | 32 | 15,060 | 565.8 | 5,176 | 12,200 |
+| 65,536 | 2 | 1,269 | 464.8 | 22,316 | 27,776 |
+| 65,536 | 8 | 755 | 105.2 | 22,220 | 36,576 |
+| 65,536 | 32 | 779 | 24.7 | 22,300 | 75,004 |
+
+Unbounded and disabled caches were also measured. RG uses direct accumulation
+in every mode, so these cases do not retain dense child force arrays. Generic
+CV children still use the configured tensor cache. These measurements establish
+performance for the scripted RG composition and Reference platform only;
+optimized CPU/GPU platforms, other CV workloads and integration remain separate
+requirements.
 
 ## Validation and optimization rules
 
@@ -242,7 +296,7 @@ GPU jobs must run through Slurm. Use at most two nodes concurrently across all
 jobs for this project. Generated builds, logs, trajectories and benchmark results
 belong under ignored directories.
 
-## Documentation discrepancies found during the initial audit
+## Documentation discrepancies found during implementation
 
 - `CLAUDE.md` lists NonbondedForce, Custom forces and Python bindings as future
   work, although partial implementations already exist.
@@ -272,6 +326,16 @@ belong under ignored directories.
   `1/r^2`. Its actual three-dimensional tail integral contains an `r^2` measure,
   so an unmodified power-law energy `r^-p` needs `p > 3` to converge. Rust reports
   failure in terms of convergence of the integral instead.
+
+- Burn's NdArray storage clone comments describe borrowed-byte clones as cheap
+  shared copies. Native `TensorData` byte allocations can instead copy the whole
+  buffer. CPU constructors use shared arrays, including the initial Context state,
+  and force output vectors transfer ownership directly into those arrays.
+
+- `ReferenceAndersenThermostat.cpp` labels its step size and collision frequency
+  as fs and inverse fs. Its caller passes ps and inverse ps, matching the public
+  `AndersenThermostat` header. The internal comment is stale; the reference code
+  uses the public units.
 
 Implementation and reference tests take precedence over outdated descriptions.
 

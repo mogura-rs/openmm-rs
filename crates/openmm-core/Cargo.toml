@@ -6,7 +6,7 @@ license = "MIT AND BSD-3-Clause"
 
 [features]
 default = ["ndarray"]
-ndarray = ["burn/ndarray"]
+ndarray = ["burn/ndarray", "dep:ndarray"]
 wgpu    = ["burn/wgpu"]
 cuda    = ["burn/cuda"]
 
@@ -18,6 +18,7 @@ uom.workspace = true
 # mdtraj-rs.workspace = true  # uncomment when file I/O module is implemented
 rustfft = "6"
 libm = "0.2"
+ndarray = { version = "0.17.2", optional = true }
 
 [dev-dependencies]
 approx.workspace = true

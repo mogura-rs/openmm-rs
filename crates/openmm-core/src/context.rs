@@ -1,4 +1,5 @@
 use crate::forces::alignment::{OrientationRestraintForce, RMSDForce};
+use crate::forces::custom_cv::{update_force_parameters, CustomCVForce};
 // Context owns the mutable simulation state and drives the MD loop.
 // Generic over burn Backend: NdArray (CPU), Wgpu (GPU), Cuda.
 use burn::prelude::*;
@@ -87,8 +88,8 @@ impl<B: Backend> Context<B> {
                 }
             }
         }
-        let positions = Tensor::zeros([n, 3], &device);
-        let velocities = Tensor::zeros([n, 3], &device);
+        let positions = crate::tensor::from_f64_vec(vec![0.0; 3 * n], [n, 3], &device);
+        let velocities = crate::tensor::from_f64_vec(vec![0.0; 3 * n], [n, 3], &device);
         Self {
             system,
             integrator,
@@ -265,6 +266,46 @@ impl<B: Backend> Context<B> {
                 panic!("force at index {force_index} is not a OrientationRestraintForce")
             });
         target.update_parameters_from(source);
+    }
+
+    pub fn collective_variable_values(&self, force_index: usize) -> Vec<f64> {
+        let force = self
+            .system
+            .forces()
+            .get(force_index)
+            .expect("unknown force index");
+        let force = force
+            .as_any()
+            .downcast_ref::<CustomCVForce<B>>()
+            .expect("force is not a CustomCVForce");
+        force.collective_variable_values(&self.positions, self.periodic_box_vectors.as_ref())
+    }
+
+    pub fn update_force_parameters_at_path(
+        &mut self,
+        path: &[usize],
+        source: &dyn crate::Force<B>,
+    ) -> Result<(), String> {
+        let (&index, rest) = path
+            .split_first()
+            .ok_or_else(|| "force path must not be empty".to_owned())?;
+        let mut target = self
+            .system
+            .forces_mut()
+            .get_mut(index)
+            .ok_or_else(|| "force index out of range".to_owned())?
+            .as_mut();
+        for &index in rest {
+            let cv = target
+                .as_any_mut()
+                .downcast_mut::<CustomCVForce<B>>()
+                .ok_or_else(|| "force path must traverse CustomCVForce objects".to_owned())?;
+            if index >= cv.num_collective_variables() {
+                return Err("collective variable index out of range".to_owned());
+            }
+            target = cv.collective_variable_mut(index);
+        }
+        update_force_parameters(target, source)
     }
 
     pub fn update_custom_external_force_parameters(

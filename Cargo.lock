@@ -4115,6 +4115,7 @@ dependencies = [
  "burn",
  "libm",
  "nalgebra",
+ "ndarray 0.17.2",
  "rayon",
  "rustfft",
  "uom",

@@ -1,3 +1,5 @@
+mod custom_cv;
+use custom_cv::PyCustomCVForce;
 mod collective;
 use collective::{PyCustomVolumeForce, PyOrientationRestraintForce, PyRGForce, PyRMSDForce};
 mod custom_hbond;
@@ -1921,70 +1923,7 @@ impl PySystem {
     }
 
     fn add_force(&mut self, force: &Bound<'_, PyAny>) -> PyResult<usize> {
-        if let Ok(force) = force.extract::<PyRef<'_, PyRMSDForce>>() {
-            return Ok(self.inner_mut().add_force(Box::new(force.inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyRGForce>>() {
-            return Ok(self.inner_mut().add_force(Box::new(force.inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyOrientationRestraintForce>>() {
-            return Ok(self.inner_mut().add_force(Box::new(force.inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyCustomVolumeForce>>() {
-            return Ok(self.inner_mut().add_force(Box::new(force.inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyCustomHbondForce>>() {
-            return Ok(self.inner_mut().add_force(Box::new(force.snapshot())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyCustomCentroidBondForce>>() {
-            return Ok(self.inner_mut().add_force(Box::new(force.snapshot())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyCustomCompoundBondForce>>() {
-            return Ok(self.inner_mut().add_force(Box::new(force.snapshot())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyCMAPTorsionForce>>() {
-            return Ok(self.inner_mut().add_force(Box::new(force.inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyNonbondedForce>>() {
-            let inner = &force.inner;
-            return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyCustomExternalForce>>() {
-            let inner = &force.inner;
-            return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyCustomBondForce>>() {
-            let inner = &force.inner;
-            return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyCustomAngleForce>>() {
-            let inner = &force.inner;
-            return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyCustomNonbondedForce>>() {
-            return Ok(self.inner_mut().add_force(Box::new(force.snapshot())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyCustomTorsionForce>>() {
-            let inner = &force.inner;
-            return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyHarmonicBondForce>>() {
-            let inner = &force.inner;
-            return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyHarmonicAngleForce>>() {
-            let inner = &force.inner;
-            return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyPeriodicTorsionForce>>() {
-            let inner = &force.inner;
-            return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
-        }
-        if let Ok(force) = force.extract::<PyRef<'_, PyRBTorsionForce>>() {
-            let inner = &force.inner;
-            return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
-        }
-        Err(err("unsupported force type"))
+        Ok(self.inner_mut().add_force(extract_force_snapshot(force)?))
     }
 
     fn uses_periodic_boundary_conditions(&self) -> bool {
@@ -2025,6 +1964,76 @@ impl PySystem {
         let context = self.inner_ref().create_context(integrator, device);
         Ok(PyContext { inner: context })
     }
+}
+
+fn extract_force_snapshot(force: &Bound<'_, PyAny>) -> PyResult<Box<dyn openmm_core::Force<B>>> {
+    if let Ok(cv) = force.extract::<PyRef<'_, PyCustomCVForce>>() {
+        return Ok(Box::new(cv.snapshot(force.py())?));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyRMSDForce>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyRGForce>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyOrientationRestraintForce>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyCustomVolumeForce>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyCustomHbondForce>>() {
+        return Ok(Box::new(force.snapshot()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyCustomCentroidBondForce>>() {
+        return Ok(Box::new(force.snapshot()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyCustomCompoundBondForce>>() {
+        return Ok(Box::new(force.snapshot()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyCMAPTorsionForce>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyNonbondedForce>>() {
+        let inner = &force.inner;
+        return Ok(Box::new(inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyCustomExternalForce>>() {
+        let inner = &force.inner;
+        return Ok(Box::new(inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyCustomBondForce>>() {
+        let inner = &force.inner;
+        return Ok(Box::new(inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyCustomAngleForce>>() {
+        let inner = &force.inner;
+        return Ok(Box::new(inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyCustomNonbondedForce>>() {
+        return Ok(Box::new(force.snapshot()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyCustomTorsionForce>>() {
+        let inner = &force.inner;
+        return Ok(Box::new(inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyHarmonicBondForce>>() {
+        let inner = &force.inner;
+        return Ok(Box::new(inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyHarmonicAngleForce>>() {
+        let inner = &force.inner;
+        return Ok(Box::new(inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyPeriodicTorsionForce>>() {
+        let inner = &force.inner;
+        return Ok(Box::new(inner.clone()));
+    }
+    if let Ok(force) = force.extract::<PyRef<'_, PyRBTorsionForce>>() {
+        let inner = &force.inner;
+        return Ok(Box::new(inner.clone()));
+    }
+    Err(err("unsupported force type"))
 }
 
 #[pyclass(unsendable, name = "Context")]
@@ -2161,11 +2170,30 @@ impl PyContext {
         })
     }
 
+    fn get_collective_variable_values(&self, force_index: usize) -> Vec<f64> {
+        self.inner.collective_variable_values(force_index)
+    }
+    fn update_force_parameters_at_path(
+        &mut self,
+        path: Vec<usize>,
+        force: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let force = extract_force_snapshot(force)?;
+        self.inner
+            .update_force_parameters_at_path(&path, force.as_ref())
+            .map_err(|e| err(&e))
+    }
     fn update_parameters_in_context(
         &mut self,
         force_index: usize,
         force: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        if let Ok(cv) = force.extract::<PyRef<'_, PyCustomCVForce>>() {
+            self.inner
+                .update_force_parameters_at_path(&[force_index], &cv.snapshot(force.py())?)
+                .map_err(|e| err(&e))?;
+            return Ok(());
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyRMSDForce>>() {
             self.inner
                 .update_rmsd_force_parameters(force_index, &force.inner);
@@ -2313,6 +2341,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRGForce>()?;
     m.add_class::<PyOrientationRestraintForce>()?;
     m.add_class::<PyCustomVolumeForce>()?;
+    m.add_class::<PyCustomCVForce>()?;
     m.add_class::<PyCustomAngleForce>()?;
     m.add_class::<PyCustomNonbondedForce>()?;
     m.add_class::<PyCMAPTorsionForce>()?;
