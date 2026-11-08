@@ -30,6 +30,7 @@ pub use forces::cmap_torsion::CMAPTorsionForce;
 pub use forces::custom_angle::CustomAngleForce;
 pub use forces::custom_bond::CustomBondForce;
 pub use forces::custom_external::CustomExternalForce;
+pub use forces::custom_gb::{CustomGBForce, CustomGBMethod, GBComputationType};
 pub use forces::custom_nonbonded::{CustomNonbondedForce, CustomNonbondedMethod};
 pub use forces::custom_torsion::CustomTorsionForce;
 pub use forces::gbsa_obc::{GBSAOBCForce, GBSAOBCMethod, GBSAParticle};

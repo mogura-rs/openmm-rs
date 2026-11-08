@@ -49,8 +49,8 @@ revision in generated validation results.
 | Bonded forces | Partial | Harmonic bonds/angles, periodic/RB torsions and CMAP have analytic forces and reference comparisons; broader API validation and GPU execution remain |
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
-| Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
-| Implicit solvation | Partial | GBSA-OBC supports polar/surface forces, three cutoff methods, live particle updates, cell traversal and nested CV use; CustomGB, application parameter assignment and resident GPU execution remain |
+| Custom forces | Partial | Eleven force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond, GB and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
+| Implicit solvation | Partial | GBSA-OBC and programmable CustomGB support polar/surface forces, three cutoff methods, particle updates, cell traversal and nested CV use; application parameter assignment and resident GPU execution remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator, Nose-Hoover chains, DPD, QTB and programmable CustomIntegrator have reference comparisons; checkpointing, resident GPU integration and wider molecular validation remain |
 | State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; all four Monte Carlo barostats have CPU implementations and reference fixtures; broader molecular NPT stability and GPU execution remain |
@@ -1448,6 +1448,81 @@ not measure integration, solvated biomolecules or GPU execution. One periodic
 | Periodic cutoff | 2,048 | 13.266 | 2.932 | 4,692 | 7,716 |
 | Periodic cutoff | 8,192 | 4.223 | 0.191 | 6,704 | 8,720 |
 
+## Programmable generalized Born forces
+
+`CustomGBForce` supports the three nonbonded methods, directed pair sums for the
+first computed value, subsequent single-particle values, single/pair energy
+terms, exclusions, six table types, global parameters and requested energy
+parameter derivatives. Pair energies visit each unordered pair once; the first
+computed value visits both directions. Single-particle expressions can depend
+on Cartesian coordinates. Particle parameters use contiguous storage.
+
+Computed values and reverse adjoints each occupy `N*M` doubles for `N` particles
+and `M` computed values. The reverse pass propagates force and global-parameter
+derivatives without allocating an `N*M*P` tensor for `P` derivative parameters.
+Expression inputs are bound once, constant operations are prepared before a
+particle pass, and derivative instructions omit inputs that cannot contribute
+to a requested derivative. The expression evaluator remains an interpreter;
+these schedules do not generate native machine code. Cutoff evaluations reuse
+cell storage. Nested CV evaluations release prepared force storage before a
+separate derivative evaluation to avoid retaining its workspace lock.
+
+Particle updates are copied into an existing Context. A changed table update
+count also reloads the current computed-value and energy expressions, matching
+the supplied Reference implementation. Without such a table change, modified
+expressions remain inactive until a new Context is constructed. Runtime global
+values, exclusions and cutoff settings retain their existing Context values.
+The deprecated continuous-1D function API and table resizing/renaming are also
+covered. An empty computed-value list is rejected before evaluation; the supplied
+Reference implementation dereferences its first value and can crash instead.
+
+The reference fixture spans 2,592 states from three models (a multistage chain,
+OBC and all six table types), three cutoff methods, both pair exclusion modes,
+direct and nested CV use, orthorhombic/triclinic boxes, force groups, particle/table
+updates, virtual sites, massless particles and short trajectories. Independent
+finite differences of source energies check every mobile coordinate and both
+global derivatives in 72 configurations. Rust regressions also check exact
+cutoff inclusion, f32, four-stage derivative propagation and nested CV lock
+release. An allocation regression with 4,096 particles, four computed values and
+24 requested derivatives checks that working storage does not scale with the
+product of particle, computed-value and derivative counts. Warm host force
+accumulation reuses its dense buffers; returning an owned force tensor allocates
+one output buffer.
+
+The direct comparisons produced maximum absolute errors of `1.82e-12` kJ/mol
+in energy, `1.09e-12` kJ/mol/nm in force, and `1.10e-11` in global derivatives.
+Across 1,656 finite-difference components, the maximum errors were `3.23e-7`
+for forces and `6.51e-7` for parameter derivatives.
+
+A separate five-ps fixture combines custom OBC, Lennard-Jones/electrostatics and
+harmonic bonds with a 0.1-fs step. The nonperiodic all-pair system and a periodic
+network whose pairs remain inside the cutoff check conservation and momentum.
+A third periodic chain deliberately crosses the hard cutoff. Its energy jump
+is reproduced by both implementations and is recorded separately; this custom
+expression does not smooth the descreening and polar terms at the cutoff.
+The largest absolute energy changes were `7.34e-6` and `1.03e-6` kJ/mol in
+the two noncrossing cases. The crossing case reached `11.220016` kJ/mol in both
+implementations. Trajectory agreement is checked over the first 0.1 ps, and longer differences
+are reported without treating them as a universal trajectory tolerance. These
+small systems do not establish biomolecular stability or sampling convergence.
+
+`scripts/benchmark-custom-gb.sh` measures 256, 1,024 and 4,096 particles for
+all three methods and two expression models, using one warmup and three processes
+per condition. The OBC model requests two global derivatives; the six-value
+chain requests 24. Timed queries include force and energy evaluation, and the
+fixture separately verifies the squared derivative norm. Construction is excluded
+from timing; process peak RSS includes Context and runtime overhead. The supplied
+Reference build uses Lepton JIT compilation, whereas Rust uses the interpreted
+schedule described above. These measurements do not cover an optimized OpenMM
+CPU platform, molecular integration or GPU execution.
+
+A shared cell-grid regression was added after a partially filled lattice exposed
+a rounding mismatch between grid-size division and cell-key multiplication.
+Both calculations now use the same reciprocal-cutoff multiplication. The test
+checks candidate completeness and duplicate absence against brute force,
+including translated coordinates. This correction applies to every force using
+the shared neighbor cells.
+
 ## Documentation discrepancies found during implementation
 
 - All four Monte Carlo barostat constructor comments call the rigid scaling center a
@@ -1547,6 +1622,14 @@ not measure integration, solvated biomolecules or GPU execution. One periodic
 - The custom-integrator analyzer rejects `fN` plus `energyN` in one computation
   despite the header only prohibiting dependence on multiple force groups.
   Rust preserves that rejection and records the restriction explicitly.
+
+- `CustomGBForce.h` says parameter updates cannot change energy expressions and
+  limit table changes to values at existing nodes. Reference rebuilds its
+  expressions whenever a table update count changes, including changed formulas,
+  table dimensions, bounds and names. Rust follows the observed code behavior.
+- Its deprecated function comments refer to `getTabulatedFunctionParameters()`
+  and `setTabulatedFunctionParameters()`, which are not members of the class.
+  The actual object API is `getTabulatedFunction().get/setFunctionParameters()`.
 
 Implementation and reference tests take precedence over outdated descriptions.
 

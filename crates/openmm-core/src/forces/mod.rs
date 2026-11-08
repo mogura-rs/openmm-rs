@@ -11,6 +11,7 @@ pub mod custom_compound;
 pub mod custom_cv;
 mod custom_evaluator;
 pub mod custom_external;
+pub mod custom_gb;
 pub mod custom_hbond;
 pub mod custom_nonbonded;
 pub mod custom_torsion;

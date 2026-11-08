@@ -322,6 +322,16 @@ pub enum TabulatedFunction {
 }
 
 impl TabulatedFunction {
+    pub fn update_count(&self) -> u64 {
+        match self {
+            Self::Continuous1D(f) => f.update_count(),
+            Self::Continuous2D(f) => f.update_count(),
+            Self::Continuous3D(f) => f.update_count(),
+            Self::Discrete1D(f) => f.update_count(),
+            Self::Discrete2D(f) => f.update_count(),
+            Self::Discrete3D(f) => f.update_count(),
+        }
+    }
     pub fn arity(&self) -> usize {
         match self {
             Self::Continuous1D(_) | Self::Discrete1D(_) => 1,

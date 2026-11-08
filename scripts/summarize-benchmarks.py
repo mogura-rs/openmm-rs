@@ -55,6 +55,8 @@ def main():
             assert math.isclose(record["energy"], expected, rel_tol=1e-8, abs_tol=1e-6), records
             if "force_squared_norm" in record:
                 assert math.isclose(record["force_squared_norm"], records[0]["force_squared_norm"], rel_tol=1e-8, abs_tol=1e-6), records
+            if "derivative_squared_norm" in record:
+                assert math.isclose(record["derivative_squared_norm"], records[0]["derivative_squared_norm"], rel_tol=1e-8, abs_tol=1e-6), records
             if record.get("integrator", "").startswith("nose_") or (record.get("integrator") == "dpd" and record["temperature"] == 0):
                 assert math.isclose(record["kinetic_energy"], records[0]["kinetic_energy"], rel_tol=1e-8, abs_tol=1e-7), records
     summaries = {}
@@ -74,6 +76,8 @@ def main():
     note = "Single-process CPU force/energy benchmark against OpenMM Reference; process RSS includes runtime and library overhead. Optimized OpenMM CPU/CUDA platforms and integration throughput are not measured here."
     if all(record.get("force") == "gbsa_obc" for rows in groups.values() for record in rows):
         note = "Matched f64 GBSA-OBC force/energy queries on a 0.3 nm cubic lattice, with one warmup evaluation. The box side is ceil(cuberoot(N))*0.3 nm and the cutoff is 0.8 nm. Charges, radii and scaling factors vary periodically by particle index. Energy and squared force norm are compared across implementations. Rust uses cell candidates for cutoff methods; the supplied Reference kernel scans all particle pairs. NoCutoff remains quadratic. Timings exclude construction; process RSS includes runtime, Context storage and one final force snapshot. This is an implicit-solvent force benchmark, not a complete molecular simulation or GPU comparison."
+    if all(record.get("force") == "custom_gb" for rows in groups.values() for record in rows):
+        note = "Matched f64 CustomGB force/energy evaluation on a 0.3 nm lattice with cutoff 0.8 nm, one warmup and three processes per condition. Model 0 uses OBC expressions with two computed values and two requested global derivatives. Model 1 uses six computed values and 24 requested derivatives. All derivatives are computed during force evaluation; an extra untimed derivative request records their squared norm. Energy, force norm and derivative norm are checked across implementations. Construction is excluded from timing; process peak RSS includes Context and runtime overhead. NoCutoff is quadratic; cutoff methods use neighbor traversal. This measures synthetic expressions, not a complete force field or GPU execution."
     if all(record.get("api") == "Context.step" for rows in groups.values() for record in rows):
         note = "Single-process f64 integration with AndersenThermostat at 300 K, 37/ps, dt=0.001 ps, no potential forces and 10 warmup steps. Kinetic energy is checked against a six-standard-deviation equilibrium bound; random paths differ. Optimized CPU/GPU platforms are not measured."
     if all("integrator" in record for rows in groups.values() for record in rows):

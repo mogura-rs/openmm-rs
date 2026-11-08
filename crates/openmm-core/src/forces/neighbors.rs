@@ -51,7 +51,7 @@ impl Geometry {
                 }
             }
             let dimensions = std::array::from_fn(|axis| {
-                ((maximum[axis] - minimum[axis]) / cutoff).floor() as i64 + 1
+                ((maximum[axis] - minimum[axis]) * cutoff.recip()).floor() as i64 + 1
             });
             Self {
                 dimensions,
@@ -186,6 +186,42 @@ mod tests {
     use super::*;
     use crate::forces::harmonic_bond::apply_minimum_image_ortho;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn rounded_outer_grid_layer_remains_inside_cell_storage() {
+        for translation in [[0.0; 3], [-4.2, 7.1, -0.3]] {
+            let n = 1024;
+            let positions: Vec<_> = (0..n)
+                .flat_map(|i| {
+                    [
+                        0.3 * (i % 11) as f64 + translation[0],
+                        0.3 * ((i / 11) % 11) as f64 + translation[1],
+                        0.3 * (i / 121) as f64 + translation[2],
+                    ]
+                })
+                .collect();
+            let distance = |i: usize, j: usize| {
+                (0..3)
+                    .map(|axis| (positions[3 * j + axis] - positions[3 * i + axis]).powi(2))
+                    .sum::<f64>()
+            };
+            let mut expected = BTreeSet::new();
+            for i in 0..n {
+                for j in i + 1..n {
+                    if distance(i, j) < 0.8 * 0.8 {
+                        expected.insert((i, j));
+                    }
+                }
+            }
+            let mut actual = BTreeSet::new();
+            NeighborCells::default().visit(&positions, 0.8, None, |i, j| {
+                if distance(i, j) < 0.8 * 0.8 {
+                    assert!(actual.insert((i, j)), "duplicate pair");
+                }
+            });
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn cell_candidates_cover_cutoff_pairs_without_duplicates() {

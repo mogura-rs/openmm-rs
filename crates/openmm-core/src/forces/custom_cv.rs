@@ -264,6 +264,8 @@ impl<B: Backend> CustomCVForce<B> {
                         });
                     }
                 }
+            } else {
+                drop(prepared);
             }
             if want_derivatives && !self.derivative_names.is_empty() {
                 for (name, value) in force.energy_parameter_derivatives(positions, vectors) {
@@ -392,6 +394,7 @@ pub(crate) fn update_force_parameters<B: Backend>(
     update!(crate::RBTorsionForce);
     update!(crate::NonbondedForce);
     update!(crate::GBSAOBCForce);
+    update!(crate::CustomGBForce);
     update!(crate::CustomExternalForce);
     update!(crate::CustomBondForce);
     update!(crate::CustomAngleForce);
