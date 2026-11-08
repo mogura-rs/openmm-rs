@@ -19,7 +19,8 @@ case "${1:-fixed}" in
     variable) kinds=(variable_verlet variable_langevin) ;;
     compound) kinds=(compound_verlet compound_langevin) ;;
     nose) kinds=(nose_hoover nose_pairs) ;;
-    *) echo "Expected fixed, variable, compound or nose" >&2; exit 2 ;;
+    dpd) kinds=(dpd) ;;
+    *) echo "Expected fixed, variable, compound, nose or dpd" >&2; exit 2 ;;
 esac
 for kind in "${kinds[@]}"; do
     temperatures=(0 300)
@@ -34,6 +35,13 @@ for kind in "${kinds[@]}"; do
                 4096) iterations=1500 ;;
                 65536) iterations=200 ;;
             esac
+            if [[ "$kind" == dpd ]]; then
+                case "$particles" in
+                    8) iterations=3000 ;;
+                    4096) iterations=100 ;;
+                    65536) iterations=10 ;;
+                esac
+            fi
             for repetition in 1 2 3; do
                 order=(rust reference)
                 if [[ "$repetition" == 2 ]]; then order=(reference rust); fi

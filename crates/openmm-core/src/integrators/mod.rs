@@ -1,5 +1,6 @@
 pub mod brownian;
 pub mod compound;
+pub mod dpd;
 pub mod langevin;
 pub mod nose_hoover;
 mod random;
@@ -28,6 +29,12 @@ pub(crate) fn fixed_particles<B: Backend>(masses: &Tensor<B, 1>) -> Tensor<B, 2,
 }
 
 pub type IntegratorComponent<B> = std::sync::Arc<std::sync::Mutex<Box<dyn Integrator<B>>>>;
+
+#[derive(Clone, Copy)]
+pub struct StepEnvironment {
+    pub box_vectors: Option<[[f64; 3]; 3]>,
+    pub max_step_size: f64,
+}
 
 /// Time-stepping algorithm. Operates on raw tensors (nm, nm/ps).
 pub trait Integrator<B: Backend>: Send + Sync {
@@ -136,6 +143,26 @@ pub trait Integrator<B: Backend>: Send + Sync {
         _limit: f64,
     ) -> Result<(), ConstraintError> {
         self.step_constrained(positions, velocities, forces, masses, constraints)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_in_environment(
+        &self,
+        positions: &mut Tensor<B, 2>,
+        velocities: &mut Tensor<B, 2>,
+        forces: &Tensor<B, 2>,
+        masses: &Tensor<B, 1>,
+        constraints: &ConstraintSolver,
+        environment: StepEnvironment,
+    ) -> Result<(), ConstraintError> {
+        self.step_with_limit(
+            positions,
+            velocities,
+            forces,
+            masses,
+            constraints,
+            environment.max_step_size,
+        )
     }
 
     /// Force correction used when reporting kinetic energy.

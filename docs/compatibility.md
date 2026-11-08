@@ -51,7 +51,7 @@ revision in generated validation results.
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
-| Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator and Nose-Hoover chains have reference comparisons; other integrators and wider statistical validation remain |
+| Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator, Nose-Hoover chains and DPD have reference comparisons; other integrators and wider statistical validation remain |
 | State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; all four Monte Carlo barostats have CPU implementations and reference fixtures; broader molecular NPT stability and GPU execution remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; integrator settings are shared with the bound Context; broader names/signatures, units and platform selection remain incomplete |
@@ -902,8 +902,8 @@ The source integrator reports only each thermostat's absolute masked kinetic
 energy, omitting pair relative motion and unthermostated particles. Rust reports
 one half of the mass-weighted squared velocity over all particles. Reference
 comparisons compute this same total directly from its saved velocities and record
-the source API's omitted energy separately. These differences are intentional compatibility exceptions approved for physical
-correctness.
+the source API's omitted energy separately. These differences are intentional
+compatibility exceptions approved for physical correctness.
 
 The Reference guard for absolute masked kinetic energy below `1e-8` skips both
 chains even when the pair has relative motion. Rust retains the absolute-chain
@@ -945,6 +945,131 @@ do not allocate particle-sized temporaries. Rust uses less process memory in
 these cases and is faster at the larger sizes. Reference remains slightly faster
 for eight individual atoms. These timings exclude potential-force costs and do
 not establish equilibrium sampling or optimized OpenMM CPU/GPU performance.
+
+## Dissipative particle dynamics
+
+`DPDIntegrator` implements the Reference middle splitting: full force kick,
+velocity constraints, half drift, sequential radial pair thermostat updates,
+second half drift, position constraints, velocity reconstruction and virtual
+sites. Kinetic energy uses stored velocities, while thermal initialization uses
+a half-step force offset. Temperature, step size, constraint tolerance and force
+groups remain live. Particle types, pair overrides, default friction/cutoff and
+periodic-system status are captured when a Context is created. Pair overrides
+are symmetric, later entries win, and invalid entries are rejected even when
+neither type occurs in the System. Python exposes both naming conventions,
+retains original integrator objects and supports nested CompoundIntegrator
+selection and direct execution of an inactive child.
+
+The pair thermostat uses the midpoint distance `r`, weight `w=1-r/cutoff`, decay
+`a=exp(-2*friction*w*w*dt)`, and reduced mass `mu`. Its radial relative velocity
+has conditional mean `a*v_radial` and variance `(1-a*a)*kT/mu`. Each update
+preserves the two massive particles' total momentum and leaves their tangential
+relative velocity unchanged. Particle velocities are updated in place, so pair
+order matters. The CPU implementation preserves Reference voxel traversal and
+particle insertion order. Neighbor membership is evaluated at the old positions
+with the maximum captured cutoff, then each pair is tested against its own
+cutoff at the midpoint. A pair that enters the cutoff during the first half drift
+can therefore be absent from that step, matching the supplied implementation.
+
+The current box is passed to the integrator after Context state updates, including
+barostat changes. Reference periodic voxel wrapping and triclinic minimum images
+are retained. This target is specifically the Reference sequential algorithm;
+the supplied Common kernel accumulates pair increments from pre-thermostat
+velocities. Reference agreement does not establish GPU trajectory agreement.
+
+### Storage and traversal
+
+On the f64 CPU path, positions and velocities are updated directly and one
+midpoint buffer is reused. A small-system path visits candidate pairs directly
+and sorts them in Reference traversal order. Larger periodic systems use a dense
+cell array when the cell count is at most three times the particle count and at
+most 16 million cells. Other grids use a reusable hash map and linked particle
+indices. No full pair list or per-cell particle vectors are allocated each step.
+A warmed unconstrained Context has a regression test that rejects new dense
+particle-buffer allocations. The f32 path also works, but currently converts
+state to host f64 scratch rather than using the direct f64 update path.
+
+Captured type overrides use sparse symmetric entries instead of a quadratic
+matrix over all distinct types. Storage scales with particles, occupied cells,
+and configured overrides; unused type pairs do not enlarge the search cutoff.
+The default cutoff and every applicable override contribute to the captured
+maximum, including an earlier override superseded by a later entry, as in
+Reference.
+
+### Numerical and statistical checks
+
+The deterministic fixture checks 1,728 states and 722,304 scalar comparisons across
+non-periodic, orthorhombic
+and triclinic systems; default and explicit types; constraints and virtual sites;
+and standalone, selected nested and directly called inactive integrators. It
+changes live settings and box vectors, checks captured defaults and overrides,
+and exercises both small-system and dense-cell traversal. Positions and forces
+matched exactly; maximum velocity error was `2.8e-17` nm/ps and maximum kinetic
+energy error was `9.7e-10` kJ/mol. Core tests also check
+f32 execution, exact two-particle damping, cutoff crossings, sparse configuration,
+fixed particles, RNG reproducibility and unchanged tangential motion.
+
+Six one-step ensembles use 16,000 samples each at 50, 300 and 600 K with friction
+1 and 20/ps. Reference and Rust are independently checked against the conditional
+radial Gaussian mean and variance; matching random paths is not required. Three
+periodic ideal-fluid checks use 64 particles in a 3 nm cube, cutoff 1.2 nm,
+friction 10/ps and dt=0.002 ps at 70, 300 and 600 K. Each has 20 ps warmup and
+100 ps measurement, sampled every 0.02 ps. Total momentum starts at zero, so the
+kinetic distribution is checked with `3*(64-1)` degrees of freedom. Mean kinetic
+energy must be within 6% of equipartition, variance within 20% of the canonical
+value, and momentum error below `3e-10` Da nm/ps. The measured maximum relative
+deviations were 0.993% for the mean and 9.46% for the variance, with maximum
+momentum error `1.01e-12` Da nm/ps across both implementations. These finite ideal-fluid checks
+do not establish molecular force-field stability or general sampling convergence.
+
+### Approved fixed-particle exception and singular inputs
+
+For a massive particle interacting with a massless particle, the supplied
+Reference and Common formulas use `m1*m2/(m1+m2)=0` and then divide thermal energy
+by that value. Reference produces NaN positions and velocities even at zero
+temperature. The approved correction sets a massless particle's inverse mass to
+zero and uses `mu=1/(inverse_mass1+inverse_mass2)`. The massive particle then
+receives the radial OU update, while the fixed particle's state is unchanged.
+Its momentum exchange is with the fixed external support, so two-particle momentum
+conservation is not asserted in this case. Two massless particles are skipped.
+Independent tests cover zero-temperature damping and finite-temperature variance
+for both index orders; source probes retain the original NaN results.
+
+Coincident interacting particles have no defined radial direction. Rust reports
+an explicit error instead of propagating the source NaNs. Periodic cutoffs larger
+than a box diagonal and unrepresentable voxel grids also produce explicit errors.
+These input checks do not define new collision physics. Checkpoints,
+serialization, resident GPU execution and broader molecular DPD validation remain
+outside the implemented subset.
+
+### DPD performance
+
+`scripts/benchmark-stochastic.sh dpd` compares single-process f64 integration
+against OpenMM Reference at 0 and 300 K, friction 0.7/ps, cutoff 0.7 nm and
+dt=0.001 ps. Particles start on a 0.3 nm cubic lattice in a periodic cube whose
+side is `max(5, ceil(cuberoot(N)))*0.3` nm. Alternating velocities are
+`(0.1,0.2,0.3)` and `(0.2,0.4,0.6)` nm/ps. An empty periodic force marks the
+System as periodic, and the integration group mask excludes potential forces.
+After ten warmup steps, 8/4096/65536-particle cases time 3000/100/10 steps.
+The table reports the median of three runs and maximum process RSS.
+
+| Temperature, K | Particles | Rust steps/s | Reference steps/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 8 | 210097 | 90677 | 4092 | 7448 |
+| 0 | 4096 | 31.16 | 19.52 | 5372 | 9544 |
+| 0 | 65536 | 2.18 | 1.05 | 24496 | 44676 |
+| 300 | 8 | 221439 | 90723 | 4168 | 7276 |
+| 300 | 4096 | 29.85 | 18.64 | 5352 | 9400 |
+| 300 | 65536 | 2.13 | 1.08 | 24436 | 44660 |
+
+The initial hash-only traversal reached about 42,000 steps/s for eight particles
+and 1.43 steps/s for 65,536 particles. Direct pair traversal for small systems
+and dense periodic cells improve both cases without changing the pair-update
+order. The final clock, finite energy and total momentum are checked in every
+run. Zero-temperature kinetic energy is also compared between implementations;
+positive-temperature paths differ. These short timing runs do not test
+equilibrium or molecular force-field throughput. Optimized OpenMM CPU and GPU
+platforms are not included.
 
 ## Documentation discrepancies found during implementation
 

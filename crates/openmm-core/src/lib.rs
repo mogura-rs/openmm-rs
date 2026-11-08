@@ -66,3 +66,5 @@ pub use forces::membrane_barostat::{MembraneXYMode, MembraneZMode, MonteCarloMem
 pub use integrators::variable::{VariableLangevinIntegrator, VariableVerletIntegrator};
 
 pub use integrators::nose_hoover::{NoseHooverChain, NoseHooverIntegrator};
+
+pub use integrators::dpd::DPDIntegrator;

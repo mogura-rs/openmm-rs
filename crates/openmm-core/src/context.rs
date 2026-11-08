@@ -771,13 +771,16 @@ impl<B: Backend> Context<B> {
             .as_ref()
             .map_or(self.integrator.as_ref(), |child| child.as_ref());
         let (forces, _) = self.calc_forces_and_energy_groups(integrator.integration_force_groups());
-        integrator.step_with_limit(
+        integrator.step_in_environment(
             &mut self.positions,
             &mut self.velocities,
             &forces,
             &self.masses,
             &self.constraints,
-            limit,
+            crate::integrators::StepEnvironment {
+                box_vectors: self.periodic_box_vectors,
+                max_step_size: limit,
+            },
         )?;
         let dt = integrator.step_size();
         drop(child);

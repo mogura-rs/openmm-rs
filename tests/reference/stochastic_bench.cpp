@@ -1,4 +1,6 @@
 #include <openmm/BrownianIntegrator.h>
+#include <openmm/DPDIntegrator.h>
+#include <openmm/HarmonicBondForce.h>
 #include <openmm/Context.h>
 #include <openmm/CompoundIntegrator.h>
 #include <openmm/LangevinMiddleIntegrator.h>
@@ -22,6 +24,13 @@ int main(int argc,char**argv) {
     double temperature=argc>4?std::stod(argv[4]):300;
     System system;
     for(int i=0;i<n;++i)system.addParticle(1);
+    bool dpd=kind=="dpd";
+    int side=std::max(5,(int)std::ceil(std::cbrt(n)));
+    if(dpd) {
+        double length=0.3*side;
+        system.setDefaultPeriodicBoxVectors(Vec3(length,0,0),Vec3(0,length,0),Vec3(0,0,length));
+        auto* marker=new HarmonicBondForce();marker->setUsesPeriodicBoundaryConditions(true);system.addForce(marker);
+    }
     std::unique_ptr<Integrator> integrator;
     bool compound=kind=="compound_verlet" || kind=="compound_langevin";
     if(compound) {
@@ -45,6 +54,9 @@ int main(int argc,char**argv) {
         }
         integrator.reset(value);
     }
+    else if(dpd) {
+        auto* value=new DPDIntegrator(temperature,0.7,0.7,0.001);value->setRandomNumberSeed(3721);value->setIntegrationForceGroups(0);integrator.reset(value);
+    }
     else if(kind=="verlet")integrator=std::make_unique<VerletIntegrator>(0.001);
     else if(kind=="variable_verlet") {
         auto* value=new VariableVerletIntegrator(1e-5);value->setMaximumStepSize(0.001);integrator.reset(value);
@@ -58,9 +70,11 @@ int main(int argc,char**argv) {
         value->setRandomNumberSeed(3721);integrator.reset(value);
     } else throw std::runtime_error("unknown integrator");
     Context context(system,*integrator,Platform::getPlatformByName("Reference"));
-    context.setPositions(std::vector<Vec3>(n));
+    std::vector<Vec3> positions(n);
+    if(dpd)for(int i=0;i<n;++i)positions[i]=Vec3(0.3*(i%side),0.3*((i/side)%side),0.3*(i/(side*side)));
+    context.setPositions(positions);
     std::vector<Vec3> initialVelocities(n,Vec3(0.1,0.2,0.3));
-    if(kind.substr(0,5)=="nose_")for(int a=0;a<n;++a)initialVelocities[a]*=(1+a%2);
+    if(kind.substr(0,5)=="nose_" || dpd)for(int a=0;a<n;++a)initialVelocities[a]*=(1+a%2);
     context.setVelocities(initialVelocities);
     auto advance=[&](int steps) {
         if(compound) {
@@ -91,6 +105,8 @@ int main(int argc,char**argv) {
     }
     double expected=0.5*(3*n*variance+meanSquared);
     double stddev=std::sqrt(1.5*n*variance*variance+variance*meanSquared);
+    Vec3 momentum;
+    if(dpd) {auto state=context.getState(State::Velocities);for(auto v: state.getVelocities())momentum+=v;}
     std::ostringstream expectedStream;expectedStream<<std::setprecision(17)<<expected;
-    std::cout<<std::setprecision(17)<<"{\"implementation\":\"openmm-reference\",\"precision\":\"f64\",\"api\":\"Context.step\",\"integrator\":\""<<kind<<"\",\"temperature\":"<<temperature<<",\"particles\":"<<n<<",\"iterations\":"<<iterations<<",\"seconds\":"<<seconds<<",\"evaluations_per_second\":"<<iterations/seconds<<",\"energy\":0,\"kinetic_energy\":"<<energy<<",\"expected_kinetic_energy\":"<<(kind.substr(0,5)=="nose_" ? "null" : expectedStream.str())<<",\"kinetic_energy_stddev\":"<<stddev<<",\"simulation_time\":"<<context.getTime()<<",\"step_count\":"<<context.getStepCount()<<",\"adaptive\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<",\"maximum_step_size\":0.001,\"error_tolerance\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"0.00001":"null")<<",\"compound_switch_each_step\":"<<(compound?"true":"false")<<",\"clock_repair\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<"}\n";
+    std::cout<<std::setprecision(17)<<"{\"implementation\":\"openmm-reference\",\"precision\":\"f64\",\"api\":\"Context.step\",\"integrator\":\""<<kind<<"\",\"temperature\":"<<temperature<<",\"particles\":"<<n<<",\"iterations\":"<<iterations<<",\"seconds\":"<<seconds<<",\"evaluations_per_second\":"<<iterations/seconds<<",\"energy\":0,\"kinetic_energy\":"<<energy<<",\"expected_kinetic_energy\":"<<((kind.substr(0,5)=="nose_" || dpd) ? "null" : expectedStream.str())<<",\"kinetic_energy_stddev\":"<<stddev<<",\"simulation_time\":"<<context.getTime()<<",\"step_count\":"<<context.getStepCount()<<",\"adaptive\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<",\"maximum_step_size\":0.001,\"error_tolerance\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"0.00001":"null")<<",\"compound_switch_each_step\":"<<(compound?"true":"false")<<",\"clock_repair\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<",\"momentum\":["<<momentum[0]<<","<<momentum[1]<<","<<momentum[2]<<"]}\n";
 }

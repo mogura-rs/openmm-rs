@@ -172,6 +172,21 @@ impl<B: Backend> Integrator<B> for CompoundIntegrator<B> {
             .step_constrained(p, v, f, m, c)
     }
 
+    fn step_in_environment(
+        &self,
+        p: &mut Tensor<B, 2>,
+        v: &mut Tensor<B, 2>,
+        f: &Tensor<B, 2>,
+        m: &Tensor<B, 1>,
+        c: &ConstraintSolver,
+        environment: crate::integrators::StepEnvironment,
+    ) -> Result<(), ConstraintError> {
+        self.children[self.current]
+            .lock()
+            .unwrap()
+            .step_in_environment(p, v, f, m, c, environment)
+    }
+
     fn step_with_limit(
         &self,
         p: &mut Tensor<B, 2>,

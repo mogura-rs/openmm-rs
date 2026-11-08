@@ -114,6 +114,21 @@ impl<T: Integrator<B>> Integrator<B> for SharedIntegrator<T> {
     fn supports_step_to(&self) -> bool {
         self.0.lock().unwrap().supports_step_to()
     }
+    fn step_in_environment(
+        &self,
+        p: &mut Tensor<B, 2>,
+        v: &mut Tensor<B, 2>,
+        f: &Tensor<B, 2>,
+        m: &Tensor<B, 1>,
+        c: &ConstraintSolver,
+        environment: openmm_core::integrators::StepEnvironment,
+    ) -> Result<(), ConstraintError> {
+        self.0
+            .lock()
+            .unwrap()
+            .step_in_environment(p, v, f, m, c, environment)
+    }
+
     fn step_with_limit(
         &self,
         p: &mut Tensor<B, 2>,
@@ -227,6 +242,8 @@ macro_rules! integrator_class {
     };
 }
 
+mod dpd;
+use dpd::PyDPDIntegrator;
 mod nose_hoover;
 use nose_hoover::{PyNoseHooverChain, PyNoseHooverIntegrator};
 
@@ -604,6 +621,7 @@ fn prepare_shared(object: &Bound<'_, PyAny>) -> PyResult<(Box<dyn Integrator<B>>
             }
         };
     }
+    extract!(PyDPDIntegrator);
     extract!(PyNoseHooverIntegrator);
     extract!(PyCompoundIntegrator);
     extract!(PyVariableVerletIntegrator);
@@ -657,6 +675,7 @@ pub(crate) fn create_context(
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PyDPDIntegrator>()?;
     module.add_class::<PyNoseHooverIntegrator>()?;
     module.add_class::<PyNoseHooverChain>()?;
     module.add_class::<PyCompoundIntegrator>()?;
@@ -667,6 +686,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLangevinIntegrator>()?;
     module.add_class::<PyBrownianIntegrator>()?;
     for class in [
+        module.py().get_type::<PyDPDIntegrator>(),
         module.py().get_type::<PyNoseHooverIntegrator>(),
         module.py().get_type::<PyNoseHooverChain>(),
         module.py().get_type::<PyCompoundIntegrator>(),
@@ -677,6 +697,17 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.py().get_type::<PyBrownianIntegrator>(),
     ] {
         for (snake, camel) in [
+            ("get_default_friction", "getDefaultFriction"),
+            ("set_default_friction", "setDefaultFriction"),
+            ("get_default_cutoff", "getDefaultCutoff"),
+            ("set_default_cutoff", "setDefaultCutoff"),
+            ("get_particle_type", "getParticleType"),
+            ("set_particle_type", "setParticleType"),
+            ("get_particle_types", "getParticleTypes"),
+            ("get_num_type_pairs", "getNumTypePairs"),
+            ("add_type_pair", "addTypePair"),
+            ("get_type_pair_parameters", "getTypePairParameters"),
+            ("set_type_pair_parameters", "setTypePairParameters"),
             ("add_thermostat", "addThermostat"),
             ("add_subsystem_thermostat", "addSubsystemThermostat"),
             ("get_num_thermostats", "getNumThermostats"),

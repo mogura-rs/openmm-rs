@@ -1,7 +1,7 @@
 use burn::{backend::NdArray, tensor::TensorData};
 use openmm_core::{
-    tensor::from_floats, BrownianIntegrator, CompoundIntegrator, Context, Integrator,
-    LangevinMiddleIntegrator, NoseHooverIntegrator, System, VariableLangevinIntegrator,
+    tensor::from_floats, BrownianIntegrator, CompoundIntegrator, Context, DPDIntegrator,
+    Integrator, LangevinMiddleIntegrator, NoseHooverIntegrator, System, VariableLangevinIntegrator,
     VariableVerletIntegrator, VerletIntegrator,
 };
 use std::alloc::{GlobalAlloc, Layout, System as SystemAllocator};
@@ -10,12 +10,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const PARTICLES: usize = 4096;
 const DENSE_BYTES: usize = 3 * PARTICLES * std::mem::size_of::<f64>();
 static LARGE_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+static MAX_ALLOCATION: AtomicUsize = AtomicUsize::new(0);
 
 struct TrackingAllocator;
 
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let pointer = unsafe { SystemAllocator.alloc(layout) };
+        if !pointer.is_null() {
+            MAX_ALLOCATION.fetch_max(layout.size(), Ordering::Relaxed);
+        }
         if !pointer.is_null() && layout.size() >= DENSE_BYTES {
             LARGE_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         }
@@ -79,7 +83,8 @@ fn stochastic_cpu_steps_reuse_state_without_dense_temporaries() {
     variable_langevin.set_maximum_step_size(0.001);
     let mut compound = CompoundIntegrator::<B>::new();
     compound.add_integrator(Box::new(VerletIntegrator::new(0.001)));
-    let integrators: [Box<dyn Integrator<B>>; 7] = [
+    let integrators: [Box<dyn Integrator<B>>; 8] = [
+        Box::new(DPDIntegrator::new(300., 1., 0.35, 0.001)),
         Box::new(NoseHooverIntegrator::thermostated(300., 1., 0.001, 3, 3, 7).unwrap()),
         Box::new(compound),
         Box::new(variable_verlet),
@@ -90,6 +95,21 @@ fn stochastic_cpu_steps_reuse_state_without_dense_temporaries() {
     ];
     for integrator in integrators {
         let mut context = Context::new(system.clone(), integrator, Default::default());
+        context.set_positions(from_floats(
+            TensorData::new(
+                (0..PARTICLES)
+                    .flat_map(|i| {
+                        [
+                            0.2 * (i % 16) as f64,
+                            0.2 * ((i / 16) % 16) as f64,
+                            0.2 * (i / 256) as f64,
+                        ]
+                    })
+                    .collect::<Vec<_>>(),
+                [PARTICLES, 3],
+            ),
+            &device,
+        ));
         context.set_velocities(from_floats(
             TensorData::new(vec![1.; 3 * PARTICLES], [PARTICLES, 3]),
             &device,
@@ -103,4 +123,21 @@ fn stochastic_cpu_steps_reuse_state_without_dense_temporaries() {
             "Context must reuse its empty force buffer"
         );
     }
+    MAX_ALLOCATION.store(0, Ordering::Relaxed);
+    let mut typed = DPDIntegrator::new(300., 1., 1., 0.001);
+    for i in 0..PARTICLES {
+        typed.set_particle_type(i as i32, i as i32);
+    }
+    typed.add_type_pair(0, (PARTICLES - 1) as i32, 2., 0.8);
+    let typed_context = Context::new(system, Box::new(typed), Default::default());
+    assert!(
+        MAX_ALLOCATION.load(Ordering::Relaxed) <= 256 * PARTICLES,
+        "DPD initialization must not allocate a quadratic table over distinct types"
+    );
+    assert_eq!(
+        typed_context
+            .get_state(openmm_core::StateFlags::none())
+            .step_count,
+        0
+    );
 }
