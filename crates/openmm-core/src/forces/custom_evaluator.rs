@@ -55,6 +55,7 @@ impl<'a> CustomEvaluator<'a> {
         }
     }
 
+    #[inline]
     pub fn set_coordinates(&mut self, values: &[f64]) {
         for (&index, &value) in self.coordinates.iter().zip(values) {
             self.workspace.set(index, value);
@@ -67,14 +68,36 @@ impl<'a> CustomEvaluator<'a> {
         }
     }
 
+    #[inline]
+    pub fn set_parameter_pairs(&mut self, offset: usize, first: &[f64], second: &[f64]) {
+        for i in 0..first.len() {
+            self.workspace
+                .set(self.parameters[2 * (offset + i)], first[i]);
+            self.workspace
+                .set(self.parameters[2 * (offset + i) + 1], second[i]);
+        }
+    }
+
+    #[inline]
     pub fn evaluate(&mut self) -> f64 {
+        self.evaluate_scaled(1.0)
+    }
+
+    #[inline]
+    pub fn evaluate_scaled(&mut self, scale: f64) -> f64 {
         let energy = self.expression.evaluate(&mut self.workspace);
         for (_, index, total) in &mut self.derivatives {
-            *total += self.workspace.derivative(*index);
+            *total += scale * self.workspace.derivative(*index);
         }
         energy
     }
 
+    #[inline]
+    pub fn parameter_derivative(&self, index: usize) -> f64 {
+        self.workspace.derivative(self.derivatives[index].1)
+    }
+
+    #[inline]
     pub fn coordinate_derivative(&self, index: usize) -> f64 {
         self.workspace.derivative(self.coordinates[index])
     }

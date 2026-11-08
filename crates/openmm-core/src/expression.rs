@@ -9,6 +9,7 @@ pub struct Expression {
     instructions: Vec<Instruction>,
     pub variables: Vec<String>,
     function_names: Vec<String>,
+    function_calls: Vec<FunctionCall>,
     function_bindings: Vec<Option<usize>>,
     tables: Vec<(String, TabulatedFunction)>,
 }
@@ -24,12 +25,14 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    #[inline]
     pub fn set(&mut self, index: Option<usize>, value: f64) {
         if let Some(index) = index {
             self.inputs[index] = value;
         }
     }
 
+    #[inline]
     pub fn derivative(&self, index: Option<usize>) -> f64 {
         index.map_or(0.0, |index| self.gradients[index])
     }
@@ -67,10 +70,12 @@ impl Expression {
         variables.dedup();
         let mut instructions = Vec::new();
         let mut function_names = Vec::new();
+        let mut function_calls = Vec::new();
         compile(
             &root,
             &variables,
             &mut function_names,
+            &mut function_calls,
             &mut instructions,
             &mut HashMap::new(),
         );
@@ -79,6 +84,7 @@ impl Expression {
             variables,
             function_bindings: vec![None; function_names.len()],
             function_names,
+            function_calls,
             tables: Vec::new(),
         })
     }
@@ -100,14 +106,12 @@ impl Expression {
             .iter()
             .position(|existing| existing == name)
         {
-            for instruction in &self.instructions {
-                if let Instruction::Function(index, arity, _) = instruction {
-                    if *index == binding && *arity != function.arity() {
-                        return Err(EvalError(format!(
-                            "{name} requires {} arguments",
-                            function.arity()
-                        )));
-                    }
+            for call in &self.function_calls {
+                if call.binding == binding && call.arguments.len() != function.arity() {
+                    return Err(EvalError(format!(
+                        "{name} requires {} arguments",
+                        function.arity()
+                    )));
                 }
             }
             self.function_bindings[binding] = Some(self.tables.len());
@@ -193,9 +197,10 @@ impl Expression {
         let mut differentiable = vec![false; self.instructions.len()];
         for (index, instruction) in self.instructions.iter().enumerate() {
             differentiable[index] = match instruction {
-                Instruction::Function(_, arity, args) => {
-                    args[..*arity].iter().any(|&arg| differentiable[arg])
-                }
+                Instruction::Function(call) => self.function_calls[*call]
+                    .arguments
+                    .iter()
+                    .any(|&arg| differentiable[arg]),
                 Instruction::Literal(_) => false,
                 Instruction::Variable(input) => active_inputs[*input],
                 Instruction::Operation(op, args) => match op {
@@ -220,14 +225,7 @@ impl Expression {
             adjoints: vec![0.0; self.instructions.len()],
             gradients: vec![0.0; self.variables.len()],
             differentiable,
-            function_derivatives: vec![
-                [0.0; 3];
-                if self.function_names.is_empty() {
-                    0
-                } else {
-                    self.instructions.len()
-                }
-            ],
+            function_derivatives: vec![[0.0; 3]; self.function_calls.len()],
         }
     }
 
@@ -247,13 +245,17 @@ impl Expression {
         assert_eq!(workspace.values.len(), self.instructions.len());
         for (index, instruction) in self.instructions.iter().enumerate() {
             workspace.values[index] = match *instruction {
-                Instruction::Function(binding, _, args) => {
-                    let function = &self.tables
-                        [self.function_bindings[binding].expect("unbound tabulated function")]
+                Instruction::Function(call) => {
+                    let function_call = &self.function_calls[call];
+                    let function = &self.tables[self.function_bindings[function_call.binding]
+                        .expect("unbound tabulated function")]
                     .1;
-                    let (value, gradient) =
-                        function.evaluate(args.map(|arg| workspace.values[arg]));
-                    workspace.function_derivatives[index] = gradient;
+                    let mut arguments = [0.0; 3];
+                    for (i, &arg) in function_call.arguments.iter().enumerate() {
+                        arguments[i] = workspace.values[arg];
+                    }
+                    let (value, gradient) = function.evaluate(arguments);
+                    workspace.function_derivatives[call] = gradient;
                     value
                 }
                 Instruction::Literal(bits) => f64::from_bits(bits),
@@ -282,9 +284,9 @@ impl Expression {
                         }
                     }
                 }
-                Instruction::Function(_, arity, args) => {
-                    for (i, &arg) in args[..arity].iter().enumerate() {
-                        let derivative = workspace.function_derivatives[index][i];
+                Instruction::Function(call) => {
+                    for (i, &arg) in self.function_calls[call].arguments.iter().enumerate() {
+                        let derivative = workspace.function_derivatives[call][i];
                         if workspace.differentiable[arg] && derivative != 0.0 {
                             workspace.adjoints[arg] += adjoint * derivative;
                         }
@@ -333,7 +335,13 @@ enum Instruction {
     Literal(u64),
     Variable(usize),
     Operation(Op, [usize; 3]),
-    Function(usize, usize, [usize; 3]),
+    Function(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionCall {
+    binding: usize,
+    arguments: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -521,8 +529,14 @@ impl Op {
                 b
             }
             Self::Div => {
-                result[1] = -a / (b * b);
-                1.0 / b
+                if active[1] {
+                    result[1] = -value / b;
+                }
+                if active[0] {
+                    1.0 / b
+                } else {
+                    0.0
+                }
             }
             Self::Pow => {
                 if active[1] {
@@ -559,7 +573,7 @@ impl Op {
             Self::Erfc => -2.0 / std::f64::consts::PI.sqrt() * (-a * a).exp(),
             Self::Square => 2.0 * a,
             Self::Cube => 3.0 * a * a,
-            Self::Recip => -1.0 / (a * a),
+            Self::Recip => -value * value,
             Self::Min => {
                 if a >= b {
                     result[1] = 1.0;
@@ -610,6 +624,14 @@ fn optimize(expr: Expr) -> Expr {
         }
         return Expr::Literal(op.value(values));
     }
+    if op == Op::Div {
+        if let Expr::Literal(denominator) = args[1] {
+            let inverse = denominator.recip();
+            if inverse.is_normal() {
+                return Expr::Operation(Op::Mul, vec![args[0].clone(), Expr::Literal(inverse)]);
+            }
+        }
+    }
     if op == Op::Pow {
         if let Expr::Literal(power) = args[1] {
             if power.fract() == 0.0 && (0.0..=16.0).contains(&power) {
@@ -650,6 +672,7 @@ fn compile(
     expr: &Expr,
     variables: &[String],
     function_names: &mut Vec<String>,
+    function_calls: &mut Vec<FunctionCall>,
     instructions: &mut Vec<Instruction>,
     cache: &mut HashMap<Instruction, usize>,
 ) -> usize {
@@ -664,16 +687,41 @@ fn compile(
                     function_names.len() - 1
                 }
             };
-            let mut indexes = [0; 3];
-            for (index, arg) in args.iter().enumerate() {
-                indexes[index] = compile(arg, variables, function_names, instructions, cache);
-            }
-            Instruction::Function(binding, args.len(), indexes)
+            let arguments = args
+                .iter()
+                .map(|arg| {
+                    compile(
+                        arg,
+                        variables,
+                        function_names,
+                        function_calls,
+                        instructions,
+                        cache,
+                    )
+                })
+                .collect();
+            let call = FunctionCall { binding, arguments };
+            let index = function_calls
+                .iter()
+                .position(|existing| existing == &call)
+                .unwrap_or_else(|| {
+                    function_calls.push(call);
+                    function_calls.len() - 1
+                });
+            Instruction::Function(index)
         }
+
         Expr::Operation(op, args) => {
             let mut indexes = [0; 3];
             for (index, arg) in args.iter().enumerate() {
-                indexes[index] = compile(arg, variables, function_names, instructions, cache);
+                indexes[index] = compile(
+                    arg,
+                    variables,
+                    function_names,
+                    function_calls,
+                    instructions,
+                    cache,
+                );
             }
             Instruction::Operation(*op, indexes)
         }

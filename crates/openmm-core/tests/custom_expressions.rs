@@ -73,6 +73,7 @@ fn custom_cutoff_cells_preserve_forces_and_parameter_derivatives() {
     force.add_energy_parameter_derivative("g");
     force.add_per_particle_parameter("a");
     force.set_cutoff_distance(1.0);
+    force.set_nonbonded_method(openmm_core::CustomNonbondedMethod::CutoffNonPeriodic);
     for i in 0..180 {
         force.add_particle(vec![0.5 + (i % 7) as f64 * 0.1]);
         positions.extend_from_slice(&[

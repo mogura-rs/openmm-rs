@@ -63,7 +63,14 @@ integrator configurations at four time points, forty-one nonbonded configuration
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
 wrapping configurations, six minimization configurations and 184 custom-expression
-states with forces and parameter derivatives, plus 1,134 tabulated-function states and 480 CMAP states.
+states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states and 384 custom-nonbonded states.
+Custom nonbonded fixtures cover all three methods, switching, overlapping and
+empty interaction groups, computed values, table updates, global changes, box
+changes and long-range corrections. Pair forces and energies use strict double
+precision tolerances. Tail corrections use a separate `2e-7` comparison tolerance:
+the supplied Reference implementation evaluates its quadrature integrands in
+single precision, while Rust retains f64. A separate analytic power-law integral
+checks the correction and its parameter derivative.
 CMAP fixtures cover five map sizes, shared atoms, angle boundaries, triclinic
 periodicity, runtime map changes, force groups and four-step Verlet trajectories.
 Nonbonded fixtures include Ewald, electrostatic/dispersion PME, neutral and charged
@@ -98,7 +105,17 @@ splines, analytical chain-rule derivatives, clamped nearest-index lookup and
 runtime parameter updates. Continuous tables store nodal mixed derivatives and
 contract one axis at a time; immutable table data is shared by cloned forces.
 Python table objects retain shared ownership when registered with a force;
-Context updates copy a snapshot. Geometry functions such as `periodicdistance`
+Context updates copy a snapshot.
+CustomNonbondedForce also supports explicit cutoff methods, switching functions,
+interaction groups, per-particle computed values, graph-based exclusions and a
+cached long-range correction. The cache is invalidated by parameter/table updates;
+box changes rescale the cached coefficient by the current volume. Interaction
+groups avoid duplicates within one group and retain repeated pairs across groups.
+Computed values cannot be combined with registered parameter derivatives, matching
+the reference. Runtime parameter updates retain the Context's exclusions, groups,
+method and cutoff settings. Setting the cutoff distance alone no longer enables a
+cutoff; select `CutoffNonPeriodic` or `CutoffPeriodic` explicitly.
+Geometry functions such as `periodicdistance`
 are not yet supported. A constant NaN in an unselected branch can prevent the
 supplied Lepton optimizer from terminating because NaN is unequal to itself.
 Reference fixtures therefore use defined scalar domains; Rust separately checks
@@ -111,6 +128,12 @@ the iteration-limited fixture separately verifies stopping after one iteration.
 Use `scripts/benchmark-cpu.sh` and `scripts/benchmark-custom.sh` after reference validation to compare exhaustive
 and cell traversal with the OpenMM Reference platform. They record process peak
 RSS and timing; optimized OpenMM CPU/GPU performance is a separate requirement.
+For the 13,824-particle custom Lennard-Jones workload, a same-node comparison
+after adding switching, tables, computed values and interaction groups measured
+about 5.12 evaluations/s, versus 5.42 for the earlier implementation and 5.35
+for OpenMM Reference. Most of the initial regression was recovered, but an
+approximately 6% gap to the earlier implementation remains. This benchmark
+does not establish performance against optimized OpenMM CPU or GPU platforms.
 
 ## Validation and optimization rules
 
@@ -156,6 +179,11 @@ belong under ignored directories.
 
 - The validation and benchmark documentation invoked shell scripts directly, but
   those scripts lacked executable permissions. Both entry points are now executable.
+
+- The Reference long-range correction failure message asks for decay faster than
+  `1/r^2`. Its actual three-dimensional tail integral contains an `r^2` measure,
+  so an unmodified power-law energy `r^-p` needs `p > 3` to converge. Rust reports
+  failure in terms of convergence of the integral instead.
 
 Implementation and reference tests take precedence over outdated descriptions.
 

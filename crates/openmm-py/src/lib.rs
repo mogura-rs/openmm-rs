@@ -9,7 +9,7 @@ use burn::prelude::{Backend, Tensor};
 use openmm_core::forces::custom_angle::CustomAngleForce;
 use openmm_core::forces::custom_bond::CustomBondForce;
 use openmm_core::forces::custom_external::CustomExternalForce;
-use openmm_core::forces::custom_nonbonded::CustomNonbondedForce;
+use openmm_core::forces::custom_nonbonded::{CustomNonbondedForce, CustomNonbondedMethod};
 use openmm_core::forces::custom_torsion::CustomTorsionForce;
 use openmm_core::forces::periodic_torsion::TorsionParam;
 use openmm_core::forces::rb_torsion::RBTorsionParam;
@@ -1049,6 +1049,110 @@ impl PyCustomNonbondedForce {
 
 #[pymethods]
 impl PyCustomNonbondedForce {
+    #[classattr]
+    #[pyo3(name = "NoCutoff")]
+    const NO_CUTOFF: i32 = 0;
+    #[classattr]
+    #[pyo3(name = "CutoffNonPeriodic")]
+    const CUTOFF_NON_PERIODIC: i32 = 1;
+    #[classattr]
+    #[pyo3(name = "CutoffPeriodic")]
+    const CUTOFF_PERIODIC: i32 = 2;
+
+    fn set_nonbonded_method(&mut self, method: i32) -> PyResult<()> {
+        let method = match method {
+            0 => CustomNonbondedMethod::NoCutoff,
+            1 => CustomNonbondedMethod::CutoffNonPeriodic,
+            2 => CustomNonbondedMethod::CutoffPeriodic,
+            _ => return Err(err("invalid custom nonbonded method")),
+        };
+        self.inner.set_nonbonded_method(method);
+        Ok(())
+    }
+    fn get_nonbonded_method(&self) -> i32 {
+        match self.inner.nonbonded_method() {
+            CustomNonbondedMethod::NoCutoff => 0,
+            CustomNonbondedMethod::CutoffNonPeriodic => 1,
+            CustomNonbondedMethod::CutoffPeriodic => 2,
+        }
+    }
+    fn get_energy_function(&self) -> &str {
+        self.inner.energy_function()
+    }
+    fn set_energy_function(&mut self, expression: &str) -> PyResult<()> {
+        self.inner
+            .set_energy_function(expression)
+            .map_err(|error| err(&error))
+    }
+    fn add_computed_value(&mut self, name: &str, expression: &str) -> PyResult<usize> {
+        self.inner
+            .add_computed_value(name, expression)
+            .map_err(|error| err(&error))
+    }
+    fn get_num_computed_values(&self) -> usize {
+        self.inner.num_computed_values()
+    }
+    fn get_computed_value_parameters(&self, index: usize) -> (&str, &str) {
+        self.inner.computed_value_parameters(index)
+    }
+    fn set_computed_value_parameters(
+        &mut self,
+        index: usize,
+        name: &str,
+        expression: &str,
+    ) -> PyResult<()> {
+        self.inner
+            .set_computed_value_parameters(index, name, expression)
+            .map_err(|error| err(&error))
+    }
+    fn add_interaction_group(
+        &mut self,
+        set1: std::collections::HashSet<usize>,
+        set2: std::collections::HashSet<usize>,
+    ) -> usize {
+        self.inner.add_interaction_group(set1, set2)
+    }
+    fn get_num_interaction_groups(&self) -> usize {
+        self.inner.num_interaction_groups()
+    }
+    fn get_interaction_group_parameters(
+        &self,
+        index: usize,
+    ) -> (
+        std::collections::HashSet<usize>,
+        std::collections::HashSet<usize>,
+    ) {
+        let (a, b) = self.inner.interaction_group_parameters(index);
+        (a.iter().copied().collect(), b.iter().copied().collect())
+    }
+    fn set_interaction_group_parameters(
+        &mut self,
+        index: usize,
+        set1: std::collections::HashSet<usize>,
+        set2: std::collections::HashSet<usize>,
+    ) {
+        self.inner
+            .set_interaction_group_parameters(index, set1, set2);
+    }
+    fn get_use_switching_function(&self) -> bool {
+        self.inner.use_switching_function()
+    }
+    fn set_use_switching_function(&mut self, enabled: bool) {
+        self.inner.set_use_switching_function(enabled);
+    }
+    fn get_switching_distance(&self) -> f64 {
+        self.inner.switching_distance()
+    }
+    fn set_switching_distance(&mut self, distance: f64) {
+        self.inner.set_switching_distance(distance);
+    }
+    fn get_use_long_range_correction(&self) -> bool {
+        self.inner.use_long_range_correction()
+    }
+    fn set_use_long_range_correction(&mut self, enabled: bool) {
+        self.inner.set_use_long_range_correction(enabled);
+    }
+
     fn get_force_group(&self) -> u32 {
         self.inner.force_group()
     }
@@ -1165,6 +1269,9 @@ impl PyCustomNonbondedForce {
         self.inner_mut().set_particle_parameters(index, params);
     }
 
+    fn create_exclusions_from_bonds(&mut self, bonds: Vec<(usize, usize)>, bond_cutoff: usize) {
+        self.inner.create_exclusions_from_bonds(&bonds, bond_cutoff);
+    }
     fn add_exclusion(&mut self, particle1: usize, particle2: usize) {
         self.inner_mut().add_exclusion(particle1, particle2);
     }
@@ -1191,7 +1298,7 @@ impl PyCustomNonbondedForce {
         self.inner_mut().set_cutoff_distance(cutoff);
     }
 
-    fn cutoff_distance(&self) -> Option<f64> {
+    fn cutoff_distance(&self) -> f64 {
         self.inner_ref().cutoff_distance()
     }
 
