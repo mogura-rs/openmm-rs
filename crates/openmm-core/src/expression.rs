@@ -15,6 +15,7 @@ pub struct Workspace {
     values: Vec<f64>,
     adjoints: Vec<f64>,
     gradients: Vec<f64>,
+    differentiable: Vec<bool>,
 }
 
 impl Workspace {
@@ -43,7 +44,7 @@ impl Expression {
             }
             definitions.insert(name.to_owned(), parse_tree(value, &definitions)?);
         }
-        let root = parse_tree(parts[0], &definitions)?;
+        let root = optimize(parse_tree(parts[0], &definitions)?);
         let mut variables = Vec::new();
         collect_vars(&root, &mut variables);
         variables.sort();
@@ -76,16 +77,46 @@ impl Expression {
     }
 
     pub fn workspace(&self) -> Workspace {
+        self.workspace_with_derivatives(0..self.variables.len())
+    }
+
+    pub fn workspace_with_derivatives(&self, inputs: impl IntoIterator<Item = usize>) -> Workspace {
+        let mut active_inputs = vec![false; self.variables.len()];
+        for input in inputs {
+            active_inputs[input] = true;
+        }
+        let mut differentiable = vec![false; self.instructions.len()];
+        for (index, instruction) in self.instructions.iter().enumerate() {
+            differentiable[index] = match instruction {
+                Instruction::Literal(_) => false,
+                Instruction::Variable(input) => active_inputs[*input],
+                Instruction::Operation(op, args) => match op {
+                    Op::Step
+                    | Op::Delta
+                    | Op::Floor
+                    | Op::Ceil
+                    | Op::Eq
+                    | Op::Ne
+                    | Op::Lt
+                    | Op::Le
+                    | Op::Gt
+                    | Op::Ge => false,
+                    Op::Select => differentiable[args[1]] || differentiable[args[2]],
+                    _ => args[..op.arity()].iter().any(|&arg| differentiable[arg]),
+                },
+            };
+        }
         Workspace {
             inputs: vec![0.0; self.variables.len()],
             values: vec![0.0; self.instructions.len()],
             adjoints: vec![0.0; self.instructions.len()],
             gradients: vec![0.0; self.variables.len()],
+            differentiable,
         }
     }
 
     pub fn compute(&self, vars: &HashMap<&str, f64>) -> Result<f64, EvalError> {
-        let mut workspace = self.workspace();
+        let mut workspace = self.workspace_with_derivatives([]);
         for (index, name) in self.variables.iter().enumerate() {
             workspace.inputs[index] = *vars
                 .get(name.as_str())
@@ -94,7 +125,7 @@ impl Expression {
         Ok(self.evaluate(&mut workspace))
     }
 
-    /// Evaluate energy and all input derivatives without allocating.
+    /// Evaluate energy and the requested input derivatives without allocating.
     pub fn evaluate(&self, workspace: &mut Workspace) -> f64 {
         assert_eq!(workspace.values.len(), self.instructions.len());
         for (index, instruction) in self.instructions.iter().enumerate() {
@@ -110,16 +141,17 @@ impl Expression {
         workspace.adjoints[last] = 1.0;
         for index in (0..self.instructions.len()).rev() {
             let adjoint = workspace.adjoints[index];
-            if adjoint == 0.0 {
+            if adjoint == 0.0 || !workspace.differentiable[index] {
                 continue;
             }
             match self.instructions[index] {
                 Instruction::Variable(input) => workspace.gradients[input] += adjoint,
                 Instruction::Operation(op, args) => {
                     let values = args.map(|a| workspace.values[a]);
-                    let derivatives = op.derivatives(values, workspace.values[index]);
+                    let active = args.map(|arg| workspace.differentiable[arg]);
+                    let derivatives = op.derivatives(values, workspace.values[index], active);
                     for i in 0..op.arity() {
-                        if derivatives[i] != 0.0 {
+                        if active[i] && derivatives[i] != 0.0 {
                             workspace.adjoints[args[i]] += adjoint * derivatives[i];
                         }
                     }
@@ -337,7 +369,7 @@ impl Op {
         }
     }
 
-    fn derivatives(self, [a, b, _]: [f64; 3], value: f64) -> [f64; 3] {
+    fn derivatives(self, [a, b, _]: [f64; 3], value: f64, active: [bool; 3]) -> [f64; 3] {
         let mut result = [0.0; 3];
         result[0] = match self {
             Self::Add => {
@@ -357,8 +389,10 @@ impl Op {
                 1.0 / b
             }
             Self::Pow => {
-                result[1] = value * a.ln();
-                if b == 0.0 {
+                if active[1] {
+                    result[1] = value * a.ln();
+                }
+                if b == 0.0 || !active[0] {
                     0.0
                 } else {
                     b * a.powf(b - 1.0)
@@ -420,6 +454,46 @@ impl Op {
             _ => 0.0,
         };
         result
+    }
+}
+
+fn optimize(expr: Expr) -> Expr {
+    let Expr::Operation(op, args) = expr else {
+        return expr;
+    };
+    let args: Vec<_> = args.into_iter().map(optimize).collect();
+    if args.iter().all(|arg| matches!(arg, Expr::Literal(_))) {
+        let mut values = [0.0; 3];
+        for (index, arg) in args.iter().enumerate() {
+            if let Expr::Literal(value) = arg {
+                values[index] = *value;
+            }
+        }
+        return Expr::Literal(op.value(values));
+    }
+    if op == Op::Pow {
+        if let Expr::Literal(power) = args[1] {
+            if power.fract() == 0.0 && (0.0..=16.0).contains(&power) {
+                return integer_power(&args[0], power as usize);
+            }
+        }
+    }
+    Expr::Operation(op, args)
+}
+
+fn integer_power(base: &Expr, power: usize) -> Expr {
+    match power {
+        0 => Expr::Literal(1.0),
+        1 => base.clone(),
+        _ => {
+            let half = integer_power(base, power / 2);
+            let square = Expr::Operation(Op::Mul, vec![half.clone(), half]);
+            if power.is_multiple_of(2) {
+                square
+            } else {
+                Expr::Operation(Op::Mul, vec![square, base.clone()])
+            }
+        }
     }
 }
 
@@ -762,5 +836,22 @@ mod tests {
             evaluate("a*a+a; a=x*y", &[("x", 2.0), ("y", 3.0)]),
             (42.0, vec![39.0, 26.0])
         );
+    }
+
+    #[test]
+    fn restricted_derivatives_preserve_the_selected_inputs() {
+        let expression = Expression::parse("x^y+z*sqrt(t)").unwrap();
+        let mut workspace = expression.workspace_with_derivatives(
+            ["x", "z"].map(|name| expression.variable_index(name).unwrap()),
+        );
+        for (name, value) in [("x", -2.0), ("y", 3.0), ("z", 2.0), ("t", 4.0)] {
+            workspace.set(expression.variable_index(name), value);
+        }
+        assert_eq!(expression.evaluate(&mut workspace), -4.0);
+        assert_eq!(workspace.derivative(expression.variable_index("x")), 12.0);
+        assert_eq!(workspace.derivative(expression.variable_index("z")), 2.0);
+        assert_eq!(workspace.derivative(expression.variable_index("y")), 0.0);
+        assert_eq!(workspace.derivative(expression.variable_index("t")), 0.0);
+        assert_eq!(evaluate("x^2", &[("x", 1e-180)]).1, vec![2e-180]);
     }
 }

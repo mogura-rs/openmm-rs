@@ -27,7 +27,13 @@ impl<'a> CustomEvaluator<'a> {
                     .chain(coordinates.iter().copied()),
             )
             .unwrap_or_else(|error| panic!("{error}"));
-        let mut workspace = expression.workspace();
+        let mut workspace = expression.workspace_with_derivatives(
+            coordinates
+                .iter()
+                .copied()
+                .chain(derivative_names.iter().map(String::as_str))
+                .filter_map(|name| expression.variable_index(name)),
+        );
         for (name, &value) in globals {
             workspace.set(expression.variable_index(name), value);
         }

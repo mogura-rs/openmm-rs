@@ -87,7 +87,9 @@ backend precision. Existing f32 backend code remains supported.
 Scalar custom expressions support all standard Lepton scalar functions, comparisons
 with the supplied parser's precedence, and semicolon definitions evaluated from
 right to left. Function arity and unknown variables are rejected explicitly.
-Reverse-mode derivatives reuse buffers within each force evaluation; interactions
+Constant subexpressions are folded, small nonnegative integer powers use products,
+and reverse-mode evaluation skips derivatives that the caller does not request.
+Derivative buffers are reused within each force evaluation; interactions
 do not allocate variable maps or use numerical differences. `log10` remains a Rust
 extension. Tabulated functions and geometry functions such as `periodicdistance`
 are not yet supported. A constant NaN in an unselected branch can prevent the
