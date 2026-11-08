@@ -1,4 +1,5 @@
 mod pressure;
+mod program;
 use crate::forces::alignment::{OrientationRestraintForce, RMSDForce};
 use crate::forces::custom_cv::{update_force_parameters, CustomCVForce};
 // Context owns the mutable simulation state and drives the MD loop.
@@ -38,6 +39,7 @@ pub struct Context<B: Backend> {
     parameters: HashMap<String, f64>,
     time: f64,
     step_count: u64,
+    force_revision: u64,
     device: B::Device,
     constraints: ConstraintSolver,
     masses: Tensor<B, 1>,
@@ -49,6 +51,13 @@ pub struct Context<B: Backend> {
 }
 
 impl<B: Backend> Context<B> {
+    pub(crate) fn invalidate_force_cache(&mut self) {
+        self.force_revision = self.force_revision.wrapping_add(1);
+    }
+    pub(crate) fn force_state_revision(&self) -> u64 {
+        self.force_revision
+    }
+
     pub fn system(&self) -> &System<B> {
         &self.system
     }
@@ -119,6 +128,7 @@ impl<B: Backend> Context<B> {
             parameters,
             time: 0.0,
             step_count: 0,
+            force_revision: 0,
             device,
             constraints,
             masses,
@@ -131,6 +141,7 @@ impl<B: Backend> Context<B> {
     }
 
     pub fn set_positions(&mut self, pos: Tensor<B, 2>) {
+        self.invalidate_force_cache();
         assert_eq!(
             pos.dims(),
             [self.system.num_particles(), 3],
@@ -208,6 +219,7 @@ impl<B: Backend> Context<B> {
     }
 
     pub fn set_periodic_box_vectors(&mut self, vectors: BoxVectors) {
+        self.invalidate_force_cache();
         validate_box_vectors(&vectors);
         self.periodic_box_vectors = Some(vectors);
     }
@@ -217,6 +229,7 @@ impl<B: Backend> Context<B> {
     }
 
     pub fn set_parameter(&mut self, name: &str, value: f64) {
+        self.invalidate_force_cache();
         assert!(
             self.parameters.contains_key(name),
             "unknown global parameter '{name}'"
@@ -239,6 +252,7 @@ impl<B: Backend> Context<B> {
     }
 
     pub fn set_state(&mut self, state: &State<B>) {
+        self.invalidate_force_cache();
         self.time = state.time;
         self.step_count = state.step_count;
 
@@ -259,6 +273,7 @@ impl<B: Backend> Context<B> {
     }
 
     pub fn update_rmsd_force_parameters(&mut self, force_index: usize, source: &RMSDForce) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -276,6 +291,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &OrientationRestraintForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -308,6 +324,7 @@ impl<B: Backend> Context<B> {
         path: &[usize],
         source: &dyn crate::Force<B>,
     ) -> Result<(), String> {
+        self.invalidate_force_cache();
         let (&index, rest) = path
             .split_first()
             .ok_or_else(|| "force path must not be empty".to_owned())?;
@@ -335,6 +352,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &CustomExternalForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -352,6 +370,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &CustomBondForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -369,6 +388,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &CustomCompoundBondForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -388,6 +408,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &CustomCentroidBondForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -407,6 +428,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &CustomHbondForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -424,6 +446,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &CustomAngleForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -441,6 +464,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &CustomNonbondedForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -460,6 +484,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &CustomTorsionForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -477,6 +502,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &HarmonicBondForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -494,6 +520,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &HarmonicAngleForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -511,6 +538,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &CMAPTorsionForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -528,6 +556,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &PeriodicTorsionForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -547,6 +576,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &NonbondedForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -564,6 +594,7 @@ impl<B: Backend> Context<B> {
         force_index: usize,
         source: &RBTorsionForce,
     ) {
+        self.invalidate_force_cache();
         let force = self
             .system
             .forces_mut()
@@ -619,6 +650,7 @@ impl<B: Backend> Context<B> {
     }
 
     pub fn apply_constraints(&mut self, tolerance: f64) -> Result<(), ConstraintError> {
+        self.invalidate_force_cache();
         self.constraints.apply_positions(
             &self.positions.clone(),
             &mut self.positions,
@@ -629,6 +661,9 @@ impl<B: Backend> Context<B> {
     }
 
     pub fn compute_virtual_sites(&mut self) {
+        if !self.virtual_sites.is_empty() {
+            self.invalidate_force_cache();
+        }
         self.virtual_sites.compute_positions(
             self.system.virtual_sites(),
             &mut self.positions,
@@ -730,42 +765,29 @@ impl<B: Backend> Context<B> {
         limit: f64,
         component: Option<&IntegratorComponent<B>>,
     ) -> Result<f64, ConstraintError> {
-        for index in 0..self.system.forces().len() {
-            self.system.forces_mut()[index].update_context_velocities(
-                &mut self.velocities,
-                &self.host_masses,
-                self.integrator.actual_step_size(),
-                self.step_count,
-            );
-            if let Some(vectors) = self.periodic_box_vectors {
-                let proposal = self.system.forces_mut()[index].propose_context_box_update(&vectors);
-                if let Some(proposal) = proposal {
-                    let groups = self.integrator.integration_force_groups();
-                    let old_energy = self.energy_at(&self.positions, &vectors, groups);
-                    let positions = self.prepare_scaled_positions(
-                        proposal.transform,
-                        proposal.scale_molecules_as_rigid,
-                    );
-                    let new_energy = self.energy_at(&positions, &proposal.box_vectors, groups);
-                    let scaled_particles = if proposal.scale_molecules_as_rigid {
-                        self.molecules().len()
-                    } else {
-                        self.system.num_particles()
-                    };
-                    if self.system.forces_mut()[index].accept_context_box_update(
-                        &proposal,
-                        new_energy - old_energy,
-                        scaled_particles,
-                    ) {
-                        self.box_update_positions =
-                            Some(std::mem::replace(&mut self.positions, positions));
-                        self.periodic_box_vectors = Some(proposal.box_vectors);
-                    } else {
-                        self.box_update_positions = Some(positions);
-                    }
-                }
-            }
+        let root_program = self.integrator.context_program();
+        let mut settings = crate::integrators::ContextUpdateSettings {
+            step_size: self.integrator.actual_step_size(),
+            force_groups: self.integrator.integration_force_groups(),
+            uses_program_step_size: false,
+        };
+        let program = if let Some(child) = component {
+            child.lock().unwrap().context_program()
+        } else {
+            root_program.clone()
+        };
+        if let Some(program) = program {
+            settings.uses_program_step_size = root_program
+                .as_ref()
+                .is_some_and(|root| std::sync::Arc::ptr_eq(root, &program));
+            let dt = program.execute(self, settings)?;
+            self.compute_virtual_sites();
+            self.time += dt;
+            self.step_count += 1;
+            return Ok(dt);
         }
+        self.update_context_state(settings);
+        self.invalidate_force_cache();
         let child = component.map(|child| child.lock().unwrap());
         let integrator = child
             .as_ref()
@@ -897,6 +919,16 @@ impl<B: Backend> Context<B> {
         groups: u32,
         enforce_periodic_box: bool,
     ) -> State<B> {
+        self.try_get_state_options(flags, groups, enforce_periodic_box)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_get_state_options(
+        &self,
+        flags: StateFlags,
+        groups: u32,
+        enforce_periodic_box: bool,
+    ) -> Result<State<B>, ConstraintError> {
         let box_vecs = self
             .periodic_box_vectors
             .or_else(|| self.system.default_periodic_box_vectors().copied());
@@ -927,11 +959,17 @@ impl<B: Backend> Context<B> {
             None
         };
 
-        let kinetic_energy = flags
-            .energy
-            .then(|| self.kinetic_energy(forces.as_ref().unwrap()));
+        let kinetic_energy = if flags.energy {
+            Some(if let Some(program) = self.integrator.context_program() {
+                program.kinetic_energy(self, forces.as_ref().unwrap())?
+            } else {
+                self.kinetic_energy(forces.as_ref().unwrap())
+            })
+        } else {
+            None
+        };
 
-        State {
+        Ok(State {
             time: self.time,
             step_count: self.step_count,
             parameters: flags.parameters.then(|| self.parameters.clone()),
@@ -948,7 +986,7 @@ impl<B: Backend> Context<B> {
             forces: if flags.forces { forces } else { None },
             potential_energy: if flags.energy { potential_energy } else { None },
             kinetic_energy,
-        }
+        })
     }
 
     fn kinetic_energy(&self, forces: &Tensor<B, 2>) -> f64 {

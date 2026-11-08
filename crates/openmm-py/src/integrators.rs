@@ -14,18 +14,30 @@ use std::{
 };
 
 pub(crate) type SharedContext = Rc<RefCell<Context<B>>>;
+type Preparation = Rc<dyn Fn() -> PyResult<()>>;
+
 #[derive(Default)]
 struct LinkState {
     context: Weak<RefCell<Context<B>>>,
     path: Vec<usize>,
     parent: Weak<RefCell<LinkState>>,
     ever_bound: bool,
+    local_preparation: Option<Preparation>,
+    preparations: Rc<Vec<Preparation>>,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct ContextLink(Rc<RefCell<LinkState>>);
 
 impl ContextLink {
+    pub(crate) fn prepare(&self) -> PyResult<()> {
+        let state = self.0.borrow();
+        for prepare in state.preparations.iter() {
+            prepare()?;
+        }
+        Ok(())
+    }
+
     fn check_available(&self) -> PyResult<()> {
         let state = self.0.borrow();
         if state.context.upgrade().is_some() {
@@ -60,6 +72,7 @@ impl ContextLink {
     }
 
     fn step(&self, steps: usize) -> PyResult<()> {
+        self.prepare()?;
         let state = self.0.borrow();
         let context = state
             .context
@@ -76,6 +89,9 @@ impl ContextLink {
 struct SharedIntegrator<T>(Arc<Mutex<T>>);
 
 impl<T: Integrator<B>> Integrator<B> for SharedIntegrator<T> {
+    fn context_program(&self) -> Option<Arc<dyn openmm_core::integrators::ContextProgram<B>>> {
+        self.0.lock().unwrap().context_program()
+    }
     fn selected_integrator(&self) -> Option<usize> {
         self.0.lock().unwrap().selected_integrator()
     }
@@ -246,6 +262,8 @@ macro_rules! integrator_class {
     };
 }
 
+mod custom;
+use custom::PyCustomIntegrator;
 mod dpd;
 use dpd::PyDPDIntegrator;
 mod qtb;
@@ -627,6 +645,7 @@ fn prepare_shared(object: &Bound<'_, PyAny>) -> PyResult<(Box<dyn Integrator<B>>
             }
         };
     }
+    extract!(PyCustomIntegrator);
     extract!(PyDPDIntegrator);
     extract!(PyQTBIntegrator);
     extract!(PyNoseHooverIntegrator);
@@ -670,18 +689,27 @@ pub(crate) fn create_context(
         core,
         Default::default(),
     )));
+    let preparations = Rc::new(
+        bindings
+            .iter()
+            .filter_map(|(link, _)| link.0.borrow().local_preparation.clone())
+            .collect(),
+    );
     for (link, path) in bindings {
         link.bind(&inner, path);
+        link.0.borrow_mut().preparations = Rc::clone(&preparations);
     }
     Ok(PyContext {
         inner,
         system,
         integrator: integrator.clone().unbind(),
         force_objects,
+        integrator_preparation: link,
     })
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PyCustomIntegrator>()?;
     module.add_class::<PyDPDIntegrator>()?;
     module.add_class::<PyQTBIntegrator>()?;
     module.add_class::<PyNoseHooverIntegrator>()?;
@@ -694,6 +722,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLangevinIntegrator>()?;
     module.add_class::<PyBrownianIntegrator>()?;
     for class in [
+        module.py().get_type::<PyCustomIntegrator>(),
         module.py().get_type::<PyDPDIntegrator>(),
         module.py().get_type::<PyQTBIntegrator>(),
         module.py().get_type::<PyNoseHooverIntegrator>(),
@@ -706,6 +735,43 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.py().get_type::<PyBrownianIntegrator>(),
     ] {
         for (snake, camel) in [
+            ("get_num_global_variables", "getNumGlobalVariables"),
+            ("add_global_variable", "addGlobalVariable"),
+            ("get_global_variable_name", "getGlobalVariableName"),
+            ("get_global_variable", "getGlobalVariable"),
+            ("set_global_variable", "setGlobalVariable"),
+            ("get_global_variable_by_name", "getGlobalVariableByName"),
+            ("set_global_variable_by_name", "setGlobalVariableByName"),
+            ("get_num_per_dof_variables", "getNumPerDofVariables"),
+            ("add_per_dof_variable", "addPerDofVariable"),
+            ("get_per_dof_variable_name", "getPerDofVariableName"),
+            ("get_per_dof_variable", "getPerDofVariable"),
+            ("set_per_dof_variable", "setPerDofVariable"),
+            ("get_per_dof_variable_by_name", "getPerDofVariableByName"),
+            ("set_per_dof_variable_by_name", "setPerDofVariableByName"),
+            ("get_num_computations", "getNumComputations"),
+            ("get_computation_step", "getComputationStep"),
+            ("add_compute_global", "addComputeGlobal"),
+            ("add_compute_per_dof", "addComputePerDof"),
+            ("add_compute_sum", "addComputeSum"),
+            ("add_constrain_positions", "addConstrainPositions"),
+            ("add_constrain_velocities", "addConstrainVelocities"),
+            ("add_update_context_state", "addUpdateContextState"),
+            ("begin_if_block", "beginIfBlock"),
+            ("begin_while_block", "beginWhileBlock"),
+            ("end_block", "endBlock"),
+            (
+                "get_kinetic_energy_expression",
+                "getKineticEnergyExpression",
+            ),
+            (
+                "set_kinetic_energy_expression",
+                "setKineticEnergyExpression",
+            ),
+            ("get_num_tabulated_functions", "getNumTabulatedFunctions"),
+            ("add_tabulated_function", "addTabulatedFunction"),
+            ("get_tabulated_function_name", "getTabulatedFunctionName"),
+            ("get_tabulated_function", "getTabulatedFunction"),
             ("get_segment_length", "getSegmentLength"),
             ("set_segment_length", "setSegmentLength"),
             ("get_cutoff_frequency", "getCutoffFrequency"),

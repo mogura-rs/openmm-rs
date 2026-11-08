@@ -1904,6 +1904,7 @@ struct PyContext {
     inner: integrators::SharedContext,
     system: Py<PySystem>,
     integrator: Py<PyAny>,
+    integrator_preparation: integrators::ContextLink,
     force_objects: Vec<Py<PyAny>>,
 }
 
@@ -2203,6 +2204,7 @@ impl PyContext {
     }
 
     fn step(&mut self, steps: usize) -> PyResult<()> {
+        self.integrator_preparation.prepare()?;
         self.inner
             .borrow_mut()
             .try_step(steps)
@@ -2222,18 +2224,24 @@ impl PyContext {
         groups: i64,
         enforce_periodic_box: bool,
     ) -> PyResult<PyState> {
-        Ok(PyState::from_core(self.inner.borrow().get_state_options(
-            StateFlags {
-                positions,
-                velocities,
-                forces,
-                energy,
-                parameters,
-                parameter_derivatives,
-            },
-            group_mask(groups)?,
-            enforce_periodic_box,
-        )))
+        self.integrator_preparation.prepare()?;
+        Ok(PyState::from_core(
+            self.inner
+                .borrow()
+                .try_get_state_options(
+                    StateFlags {
+                        positions,
+                        velocities,
+                        forces,
+                        energy,
+                        parameters,
+                        parameter_derivatives,
+                    },
+                    group_mask(groups)?,
+                    enforce_periodic_box,
+                )
+                .map_err(|e| err(&e.to_string()))?,
+        ))
     }
 }
 

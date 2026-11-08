@@ -53,6 +53,13 @@ impl<B: Backend> CompoundIntegrator<B> {
 }
 
 impl<B: Backend> Integrator<B> for CompoundIntegrator<B> {
+    fn context_program(&self) -> Option<Arc<dyn super::ContextProgram<B>>> {
+        self.children[self.current]
+            .lock()
+            .unwrap()
+            .context_program()
+    }
+
     fn validate_system(&self, system: &crate::System<B>) -> Result<(), ConstraintError> {
         if self.children.is_empty() {
             return Err(ConstraintError(

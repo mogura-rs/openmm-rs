@@ -262,6 +262,9 @@ pub(crate) struct VirtualSitePlan {
 }
 
 impl VirtualSitePlan {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
     pub fn new(sites: &[Option<VirtualSite>], masses: &[f64]) -> Self {
         for (index, site) in sites.iter().enumerate() {
             if let Some(site) = site {

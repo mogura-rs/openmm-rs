@@ -51,7 +51,7 @@ revision in generated validation results.
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
-| Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator, Nose-Hoover chains, DPD and QTB have reference comparisons; CustomIntegrator execution and wider molecular validation remain |
+| Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator, Nose-Hoover chains, DPD, QTB and programmable CustomIntegrator have reference comparisons; checkpointing, resident GPU integration and wider molecular validation remain |
 | State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; all four Monte Carlo barostats have CPU implementations and reference fixtures; broader molecular NPT stability and GPU execution remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; integrator settings are shared with the bound Context; broader names/signatures, units and platform selection remain incomplete |
@@ -1213,6 +1213,152 @@ energy is reported as `sum(m*v^2/2)`; classical temperature and pressure formula
 must not be interpreted as quantum thermodynamic estimates. Checkpoint and state
 serialization of QTB histories remain part of the unfinished serialization work.
 
+## Programmable integration
+
+`CustomIntegrator` executes global assignments, per-DOF assignments, sums,
+position/velocity constraints, explicit Context state updates, and nested `if`
+and `while` blocks. Rust and Python expose the computation list, named global
+and per-DOF variables, tabulated functions, random seed, kinetic-energy expression,
+step size, constraint tolerance and integration force groups. The Python wrapper
+provides snake_case and OpenMM camelCase methods and the nine computation constants.
+CompoundIntegrator supports selected, nested and directly invoked inactive children.
+
+Expressions bind `dt`, masses, positions, velocities, force-group forces and
+energies, Context parameters, integrator variables and registered energy parameter
+derivatives. Per-DOF operations include `dot`, `cross`, `vector`, `_x`, `_y` and
+`_z`, and tabulated functions evaluate component by component. Sums include all
+three components of each massive particle; fixed particles retain their stored
+values and contribute nothing. Repeated uses of `uniform` or `gaussian` in one
+expression share one draw per component. A condition shares its scalar draws
+between both sides of the comparison. Each integrator owns its random stream;
+nonzero seeds reproduce Rust trajectories, but Reference trajectories use a
+different generator and consume unused random draws as well.
+
+Context updates run only when the program reaches `UpdateContextState`. The
+ordinary integrator's automatic update is skipped. Position constraints use the
+step-start positions, then replace that reference after each position projection;
+velocity constraints use the most recent such reference, matching Reference.
+Virtual sites are refreshed at the end of a step. The custom kinetic-energy
+expression is summed over massive degrees of freedom, and its `f` refers to the
+force groups requested by the energy query. Thermal velocity initialization has
+no half-step force offset for this integrator.
+
+The computation list and variable declarations freeze at Context binding.
+Reference prepares expressions lazily, on the first step or kinetic-energy query.
+Rust follows that timing for the default force-group mask, kinetic-energy
+expression and table contents. Later table or kinetic-expression setters update
+the definition returned by getters; a new Context is required to compile those
+changes. Global and per-DOF values, step size and tolerance remain live. Invalid
+variables, targets, block structure and function calls produce errors before the
+program executes. The supplied analyzer also rejects `fN` together with `energyN`
+in one computation, even for the same N; this rejection is currently preserved.
+
+### Program storage and evaluation
+
+CPU f64 programs update only the destination array. Read-only sums and auxiliary
+variable assignments borrow positions and velocities, preserving shared State
+snapshots without copying them. Per-DOF arrays, constraint reference positions and
+per-group force buffers are retained. The f32 backend uses an explicit host
+conversion path. There are no resident GPU program kernels yet.
+
+The value evaluator omits reverse-mode differentiation and partitions operations
+by their input dependencies. Expressions that depend only on step size, globals,
+Context parameters, energy or energy derivatives are evaluated before the particle
+loop. Scalar per-DOF expressions reuse one compiled program for three components;
+vector expressions reuse identical component programs, so a dot product is
+calculated once. Tabulated data remains shared. No compilation or particle-sized
+scratch allocation occurs during warmed unconstrained execution.
+
+Force, energy and derivative caches belong to their force-group masks. Position,
+box, Context parameter and force-definition changes invalidate them. Valid caches
+survive successive steps; velocity-only updates preserve them. An explicit
+barostat move invalidates caches when its proposal is accepted. The regression
+suite checks cross-step force counts, external changes and energy before/after
+volume moves, in addition to the existing allocation checks.
+
+### Reference exceptions
+
+The supplied Reference kernel captures the initial step size for its clock while
+its expressions read the updated value. Changing an initial 0.001 ps step to
+0.002 ps advances coordinates by 0.002 ps but records only 0.001 ps. Assigning
+`dt=0.003` in the program has the same defect. Rust advances time by the updated
+step size, as the Common implementation does. Explicit Context updates also see
+the current step size of the active integrator; a directly invoked inactive child
+does not replace the root integrator's settings for those updates.
+
+Reference's vector evaluator binds `f` but omits numbered forces and energy
+variables. Consequently `cross(x,f0)` and `vector(energy,energy,energy)` throw
+missing-variable errors. Rust binds them to the selected force/energy cache,
+consistent with the Common implementation. Original Reference clock and variable
+errors remain in the fixture alongside the corrected Rust assertions. GPU behavior
+has only been inspected in the source and is not claimed as validated execution.
+
+The source keeps one shared energy-derivative map while caching multiple group
+energies. After evaluating `energy1` and `energy2`, `deriv(energy1,lambda)` can
+therefore return group 2's derivative. With `E1=lambda*r`, `E2=5*lambda*r` and
+`r=2`, Reference returns 10 instead of 2. An independent Reference derivative
+query and finite difference both give 2. Rust retains derivatives with each cached
+group, so the result corresponds to the energy named in `deriv`.
+
+### Numerical coverage
+
+The fixture compares 600 states across five programs, three direct/compound
+routing modes, constraints, fixed particles, virtual sites, group selection,
+parameter changes, table evaluation, nested control flow, vector operations and
+kinetic-energy expressions. Python checks cover definition access, ownership,
+Context release/rebinding, late table changes and invalid programs. Gaussian and
+uniform moments and component covariances are checked with 8,192 massive particles;
+additional checks cover repeated random references, conditional draws and seed
+behavior. The original Source defects are reported separately rather than hidden
+inside comparison tolerances.
+
+Across those 600 states, positions, velocities, forces, potential energies and
+times agree exactly with the supplied Reference build; the largest kinetic-energy
+difference is 4.19e-9 kJ/mol. Global and auxiliary-variable differences remain
+below 6.7e-16 and 5.3e-18, respectively.
+
+A conservative harmonic program runs for 100 ps (100,000 steps). Its maximum
+relative energy drift is 5.83e-6 in both implementations, and final coordinates
+and velocities agree within 3e-10. A 256-particle BAOAB program thermalizes for
+20 ps and then measures harmonic position/velocity moments for 60 ps. The four
+block-mean deviations are below 0.88 standard errors for Rust and 0.58 for
+Reference. These tests exercise force-cache reuse over long step sequences; they
+do not establish stability for arbitrary programs or complete molecular force fields.
+
+### Program evaluation performance
+
+`scripts/benchmark-stochastic.sh custom` measures three free-particle programs
+with ten warmup steps and three repetitions, reversing process order for the
+second repetition. Both implementations update velocity and position, store an
+auxiliary per-DOF value and compute a global sum. The vector variant includes
+cross products, component extraction, vector construction and a dot product. The
+Langevin variant applies an exact OU velocity update with friction 0.7/ps; its
+kinetic energy is checked against the finite-time Gaussian distribution. All
+programs use a 0.001 ps step. The scalar/vector variants use deterministic
+velocities. Force evaluation, molecular interactions and GPU execution are absent.
+
+The table gives median steps/s and the maximum process peak RSS of the three
+runs. RSS includes runtime and library overhead. Measurements use 3,000, 300 and
+30 timed steps at 8, 4,096 and 65,536 particles, respectively. The eight-particle
+runs are short and particularly sensitive to process scheduling. Rust generates
+random values only for expressions that reference them, whereas Reference also
+generates unused draws; this contributes to the measured difference.
+
+| Program | T (K) | Particles | Rust steps/s | Reference steps/s | Rust RSS (KiB) | Reference RSS (KiB) |
+|---|---:|---:|---:|---:|---:|---:|
+| Scalar | 0 | 8 | 292,458 | 272,498 | 4,376 | 8,024 |
+| Scalar | 0 | 4,096 | 840.09 | 652.31 | 5,312 | 8,948 |
+| Scalar | 0 | 65,536 | 50.67 | 40.90 | 19,816 | 26,320 |
+| Vector | 0 | 8 | 253,210 | 109,341 | 4,476 | 8,064 |
+| Vector | 0 | 4,096 | 704.21 | 261.86 | 5,352 | 9,120 |
+| Vector | 0 | 65,536 | 42.36 | 16.45 | 19,832 | 26,244 |
+| Langevin | 0 | 8 | 264,479 | 256,338 | 4,524 | 7,852 |
+| Langevin | 0 | 4,096 | 699.29 | 582.69 | 5,404 | 9,144 |
+| Langevin | 0 | 65,536 | 42.97 | 36.75 | 18,512 | 26,264 |
+| Langevin | 300 | 8 | 260,919 | 252,203 | 4,448 | 8,004 |
+| Langevin | 300 | 4,096 | 680.39 | 580.58 | 5,560 | 8,948 |
+| Langevin | 300 | 65,536 | 42.64 | 36.37 | 18,300 | 26,248 |
+
 ## Documentation discrepancies found during implementation
 
 - All four Monte Carlo barostat constructor comments call the rigid scaling center a
@@ -1303,6 +1449,15 @@ serialization of QTB histories remain part of the unfinished serialization work.
   physical step size consistently. Its documented adapted-friction grid also
   omits the even-length Nyquist bin and uses a frequency spacing inconsistent
   with odd-length FFTs; the corrected API exposes every actual FFT bin.
+
+- `CustomIntegrator.h` describes access to numbered force groups and energies
+  from per-DOF expressions, but Reference omits these bindings for vector
+  expressions. Its clock also ignores later `dt` changes, and its derivative
+  cache can return a different group's derivative. The exceptions above preserve
+  the requested variable and time semantics and the derivative of the named energy.
+- The custom-integrator analyzer rejects `fN` plus `energyN` in one computation
+  despite the header only prohibiting dependence on multiple force groups.
+  Rust preserves that rejection and records the restriction explicitly.
 
 Implementation and reference tests take precedence over outdated descriptions.
 

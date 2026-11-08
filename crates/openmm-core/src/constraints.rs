@@ -78,7 +78,7 @@ impl ConstraintSolver {
         self.constraints.is_empty()
     }
 
-    fn solve(
+    pub(crate) fn solve(
         &self,
         reference: &[f64],
         values: &mut [f64],

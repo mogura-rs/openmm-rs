@@ -48,7 +48,7 @@ impl VectorExpression {
         )?)
     }
 
-    fn from_root(root: Expr) -> Result<Self, ParseError> {
+    pub(super) fn from_root(root: Expr) -> Result<Self, ParseError> {
         let components = lower(&root)?.map(|node| Expression::from_root(node, GeometryMode::None));
         let mut variables: Vec<_> = components
             .iter()
@@ -203,6 +203,72 @@ fn lower(node: &Expr) -> Result<[Expr; 3], ParseError> {
         }
     };
     Ok(result)
+}
+
+pub(crate) struct VectorValueProgram {
+    components: Vec<super::ValueProgram>,
+    inputs: Vec<Vec<(usize, usize, usize)>>,
+    outputs: [usize; 3],
+}
+
+impl VectorExpression {
+    pub(crate) fn value_program(self, varying_inputs: &[bool]) -> VectorValueProgram {
+        let mut unique = Vec::new();
+        let mut sources = [0; 3];
+        for (axis, source) in sources.iter_mut().enumerate() {
+            let expression = &self.components[axis];
+            if let Some(previous) = unique.iter().position(|&i: &usize| {
+                let other = &self.components[i];
+                expression.variables == other.variables
+                    && expression.instructions == other.instructions
+                    && expression.function_calls == other.function_calls
+                    && expression.function_names == other.function_names
+            }) {
+                *source = previous;
+            } else {
+                *source = unique.len();
+                unique.push(axis);
+            }
+        }
+        let mut inputs = vec![Vec::new(); self.variables.len()];
+        let mut components = Vec::new();
+        for (index, &axis) in unique.iter().enumerate() {
+            let mut varying = vec![false; self.components[axis].variables.len()];
+            for &(input, variable, source_axis) in &self.bindings[axis] {
+                varying[input] = varying_inputs[variable];
+                inputs[variable].push((index, input, source_axis));
+            }
+            components.push(super::ValueProgram::new(
+                self.components[axis].clone(),
+                &varying,
+            ));
+        }
+        VectorValueProgram {
+            components,
+            inputs,
+            outputs: sources,
+        }
+    }
+}
+
+impl VectorValueProgram {
+    pub(crate) fn set(&mut self, input: usize, value: [f64; 3]) {
+        for &(component, input, axis) in &self.inputs[input] {
+            self.components[component].set(input, value[axis]);
+        }
+    }
+    pub(crate) fn prepare(&mut self) {
+        for component in &mut self.components {
+            component.prepare();
+        }
+    }
+    pub(crate) fn evaluate(&mut self) -> [f64; 3] {
+        let mut values = [0.0; 3];
+        for (value, component) in values.iter_mut().zip(&mut self.components) {
+            *value = component.evaluate();
+        }
+        self.outputs.map(|i| values[i])
+    }
 }
 
 #[cfg(test)]

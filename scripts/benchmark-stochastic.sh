@@ -21,12 +21,13 @@ case "${1:-fixed}" in
     nose) kinds=(nose_hoover nose_pairs) ;;
     dpd) kinds=(dpd) ;;
     qtb) kinds=(qtb_fixed qtb_adaptive) ;;
-    *) echo "Expected fixed, variable, compound, nose, dpd or qtb" >&2; exit 2 ;;
+    custom) kinds=(custom_scalar custom_vector custom_langevin) ;;
+    *) echo "Expected fixed, variable, compound, nose, dpd, qtb or custom" >&2; exit 2 ;;
 esac
 for kind in "${kinds[@]}"; do
     temperatures=(0 300)
     if [[ "$kind" == nose_* || "$kind" == qtb_* ]]; then temperatures=(300); fi
-    if [[ "$kind" == verlet || "$kind" == variable_verlet || "$kind" == compound_verlet ]]; then temperatures=(0); fi
+    if [[ "$kind" == verlet || "$kind" == variable_verlet || "$kind" == compound_verlet || "$kind" == custom_scalar || "$kind" == custom_vector ]]; then temperatures=(0); fi
     for temperature in "${temperatures[@]}"; do
         directory="benchmark-results/stochastic/$kind/$temperature"
         mkdir -p "$directory"
@@ -48,6 +49,13 @@ for kind in "${kinds[@]}"; do
                     8) iterations=9900 ;;
                     4096) iterations=330 ;;
                     65536) iterations=66 ;;
+                esac
+            fi
+            if [[ "$kind" == custom_* ]]; then
+                case "$particles" in
+                    8) iterations=3000 ;;
+                    4096) iterations=300 ;;
+                    65536) iterations=30 ;;
                 esac
             fi
             for repetition in 1 2 3; do

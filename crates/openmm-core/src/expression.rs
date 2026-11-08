@@ -4,8 +4,13 @@ use crate::tabulated::TabulatedFunction;
 use std::collections::HashMap;
 use std::fmt;
 mod geometry;
+mod integrator;
+mod value;
 mod vector;
 use geometry::GeometryFunction;
+pub(crate) use integrator::EnergyDerivative;
+pub(crate) use value::ValueProgram;
+pub(crate) use vector::VectorValueProgram;
 pub use vector::{VectorExpression, VectorWorkspace};
 
 #[derive(Debug, Clone, Copy)]
@@ -128,6 +133,15 @@ impl Workspace {
 }
 
 impl Expression {
+    pub(crate) fn has_vector_operations(&self) -> bool {
+        self.function_names.iter().any(|name| {
+            matches!(
+                name.as_str(),
+                "dot" | "cross" | "vector" | "_x" | "_y" | "_z"
+            )
+        })
+    }
+
     pub fn parse(src: &str) -> Result<Self, ParseError> {
         Self::parse_impl(src, false, GeometryMode::None)
     }

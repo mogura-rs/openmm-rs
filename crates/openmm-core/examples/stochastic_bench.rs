@@ -2,9 +2,9 @@ use burn::backend::NdArray;
 use burn::tensor::TensorData;
 use openmm_core::{
     integrators::langevin::BOLTZMANN, tensor::from_floats, BrownianIntegrator, CompoundIntegrator,
-    Context, DPDIntegrator, HarmonicBondForce, Integrator, LangevinMiddleIntegrator,
-    NoseHooverIntegrator, QTBIntegrator, StateFlags, System, VariableLangevinIntegrator,
-    VariableVerletIntegrator, VerletIntegrator,
+    Context, CustomIntegrator, DPDIntegrator, HarmonicBondForce, Integrator,
+    LangevinMiddleIntegrator, NoseHooverIntegrator, QTBIntegrator, StateFlags, System,
+    VariableLangevinIntegrator, VariableVerletIntegrator, VerletIntegrator,
 };
 use std::{hint::black_box, time::Instant};
 
@@ -35,6 +35,47 @@ fn main() {
         system.add_force(Box::new(marker));
     }
     let integrator: Box<dyn Integrator<B>> = match kind {
+        "custom_scalar" | "custom_vector" | "custom_langevin" => {
+            let mut value = CustomIntegrator::new(0.001);
+            value.add_per_dof_variable("q", 0.0).unwrap();
+            value.add_global_variable("total", 0.0).unwrap();
+            value
+                .add_global_variable("kT", BOLTZMANN * temperature)
+                .unwrap();
+            value.set_random_number_seed(3721);
+            value
+                .add_compute_per_dof(
+                    "v",
+                    if kind == "custom_langevin" {
+                        "exp(-0.7*dt)*v+sqrt((1-exp(-1.4*dt))*kT/m)*gaussian"
+                    } else {
+                        "v+dt*f/m"
+                    },
+                )
+                .unwrap();
+            value.add_compute_per_dof("x", "x+dt*v").unwrap();
+            value
+                .add_compute_per_dof(
+                    "q",
+                    if kind == "custom_vector" {
+                        "cross(x,v)+vector(_x(x),_y(v),_z(x+v))"
+                    } else {
+                        "x+v+dt"
+                    },
+                )
+                .unwrap();
+            value
+                .add_compute_sum(
+                    "total",
+                    if kind == "custom_vector" {
+                        "dot(q,q)"
+                    } else {
+                        "q*q"
+                    },
+                )
+                .unwrap();
+            Box::new(value)
+        }
         "qtb_fixed" | "qtb_adaptive" => {
             let mut value = QTBIntegrator::new(temperature, 0.7, 0.001);
             value.set_segment_length(0.03275);
@@ -164,7 +205,7 @@ fn main() {
     .kinetic_energy
     .unwrap();
     let (variance, mean_squared) = match kind {
-        "langevin" | "variable_langevin" | "compound_langevin" => {
+        "langevin" | "variable_langevin" | "compound_langevin" | "custom_langevin" => {
             let decay = (-2.0 * 0.7 * 0.001 * (iterations + 10) as f64).exp();
             (
                 BOLTZMANN * temperature * (1.0 - decay),

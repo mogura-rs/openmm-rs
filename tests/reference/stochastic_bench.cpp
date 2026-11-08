@@ -1,4 +1,5 @@
 #include <openmm/BrownianIntegrator.h>
+#include <openmm/CustomIntegrator.h>
 #include <openmm/QTBIntegrator.h>
 #include <ReferencePlatform.h>
 #include <openmm/DPDIntegrator.h>
@@ -63,6 +64,17 @@ int main(int argc,char**argv) {
         }
         integrator.reset(value);
     }
+    else if(kind=="custom_scalar" || kind=="custom_vector" || kind=="custom_langevin") {
+        auto* value=new CustomIntegrator(0.001);
+        value->addPerDofVariable("q",0);value->addGlobalVariable("total",0);
+        value->addGlobalVariable("kT",1.380649e-23*6.02214076e23/1000*temperature);
+        value->setRandomNumberSeed(3721);
+        value->addComputePerDof("v",kind=="custom_langevin" ? "exp(-0.7*dt)*v+sqrt((1-exp(-1.4*dt))*kT/m)*gaussian" : "v+dt*f/m");
+        value->addComputePerDof("x","x+dt*v");
+        value->addComputePerDof("q",kind=="custom_vector" ? "cross(x,v)+vector(_x(x),_y(v),_z(x+v))" : "x+v+dt");
+        value->addComputeSum("total",kind=="custom_vector" ? "dot(q,q)" : "q*q");
+        integrator.reset(value);
+    }
     else if(qtb) {
         auto* value=new QTBIntegrator(temperature,0.7,0.001);
         value->setSegmentLength(0.03275);value->setDefaultAdaptationRate(kind=="qtb_fixed" ? 0 : 0.01);
@@ -114,7 +126,7 @@ int main(int argc,char**argv) {
         for(const auto& v : state.getVelocities())energy+=0.5*v.dot(v);
     }
     double kb=1.380649e-23*6.02214076e23/1000,variance=0,meanSquared=0.14*n;
-    if(kind=="langevin" || kind=="variable_langevin" || kind=="compound_langevin") {
+    if(kind=="langevin" || kind=="variable_langevin" || kind=="compound_langevin" || kind=="custom_langevin") {
         double decay=std::exp(-2*0.7*0.001*(iterations+10));
         variance=kb*temperature*(1-decay);meanSquared*=decay;
     } else if(kind=="brownian") {

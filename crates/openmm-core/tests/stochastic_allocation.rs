@@ -1,8 +1,8 @@
 use burn::{backend::NdArray, tensor::TensorData};
 use openmm_core::{
-    tensor::from_floats, BrownianIntegrator, CompoundIntegrator, Context, DPDIntegrator,
-    Integrator, LangevinMiddleIntegrator, NoseHooverIntegrator, QTBIntegrator, System,
-    VariableLangevinIntegrator, VariableVerletIntegrator, VerletIntegrator,
+    tensor::from_floats, BrownianIntegrator, CompoundIntegrator, Context, CustomIntegrator,
+    DPDIntegrator, Integrator, LangevinMiddleIntegrator, NoseHooverIntegrator, QTBIntegrator,
+    System, VariableLangevinIntegrator, VariableVerletIntegrator, VerletIntegrator,
 };
 use std::alloc::{GlobalAlloc, Layout, System as SystemAllocator};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -85,7 +85,15 @@ fn stochastic_cpu_steps_reuse_state_without_dense_temporaries() {
     compound.add_integrator(Box::new(VerletIntegrator::new(0.001)));
     let mut qtb = QTBIntegrator::new(300., 1., 0.001);
     qtb.set_segment_length(0.003);
-    let integrators: [Box<dyn Integrator<B>>; 9] = [
+    let mut custom = CustomIntegrator::new(0.001);
+    custom.add_per_dof_variable("q", 0.0).unwrap();
+    custom.add_global_variable("total", 0.0).unwrap();
+    custom.add_compute_per_dof("v", "v+dt*f/m").unwrap();
+    custom.add_compute_per_dof("x", "x+dt*v").unwrap();
+    custom.add_compute_per_dof("q", "cross(x,v)").unwrap();
+    custom.add_compute_sum("total", "dot(q,q)").unwrap();
+    let integrators: [Box<dyn Integrator<B>>; 10] = [
+        Box::new(custom),
         Box::new(qtb),
         Box::new(DPDIntegrator::new(300., 1., 0.35, 0.001)),
         Box::new(NoseHooverIntegrator::thermostated(300., 1., 0.001, 3, 3, 7).unwrap()),
@@ -126,6 +134,26 @@ fn stochastic_cpu_steps_reuse_state_without_dense_temporaries() {
             "Context must reuse its empty force buffer"
         );
     }
+    let mut read_only = CustomIntegrator::new(0.001);
+    read_only.add_per_dof_variable("q", 0.0).unwrap();
+    read_only.add_global_variable("total", 0.0).unwrap();
+    read_only.add_compute_per_dof("q", "x+v").unwrap();
+    read_only.add_compute_sum("total", "q*q").unwrap();
+    let mut context = Context::new(system.clone(), Box::new(read_only), Default::default());
+    context.step(1);
+    let snapshot = context.get_state(openmm_core::StateFlags {
+        positions: true,
+        velocities: true,
+        ..Default::default()
+    });
+    let before = LARGE_ALLOCATIONS.load(Ordering::Relaxed);
+    context.step(10);
+    assert_eq!(
+        LARGE_ALLOCATIONS.load(Ordering::Relaxed) - before,
+        0,
+        "reading shared particle state must not trigger copy-on-write"
+    );
+    assert!(snapshot.positions.is_some() && snapshot.velocities.is_some());
     MAX_ALLOCATION.store(0, Ordering::Relaxed);
     let mut typed = DPDIntegrator::new(300., 1., 1., 0.001);
     for i in 0..PARTICLES {

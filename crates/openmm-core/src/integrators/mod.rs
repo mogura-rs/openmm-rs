@@ -1,5 +1,6 @@
 pub mod brownian;
 pub mod compound;
+pub mod custom;
 pub mod dpd;
 pub mod langevin;
 pub mod nose_hoover;
@@ -37,8 +38,32 @@ pub struct StepEnvironment {
     pub max_step_size: f64,
 }
 
+#[derive(Clone, Copy)]
+pub struct ContextUpdateSettings {
+    pub step_size: f64,
+    pub force_groups: u32,
+    pub uses_program_step_size: bool,
+}
+
+pub trait ContextProgram<B: Backend>: Send + Sync {
+    fn execute(
+        &self,
+        context: &mut crate::Context<B>,
+        updates: ContextUpdateSettings,
+    ) -> Result<f64, ConstraintError>;
+    fn kinetic_energy(
+        &self,
+        context: &crate::Context<B>,
+        forces: &Tensor<B, 2>,
+    ) -> Result<f64, ConstraintError>;
+}
+
 /// Time-stepping algorithm. Operates on raw tensors (nm, nm/ps).
 pub trait Integrator<B: Backend>: Send + Sync {
+    fn context_program(&self) -> Option<std::sync::Arc<dyn ContextProgram<B>>> {
+        None
+    }
+
     /// Initialize internal state when attaching to a Context.
     fn initialize(&mut self) {}
 

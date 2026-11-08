@@ -151,6 +151,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - `NoseHooverIntegrator` — configurable chains, subsystem/pair baths, constraints, heat-bath energy and hard walls
 - `DPDIntegrator` — sequential pair thermostats, captured type parameters, live periodic cells and fixed-particle baths
 - `QTBIntegrator` — colored quantum noise, adaptive friction spectra, captured physical step size and reusable FFT storage
+- `CustomIntegrator` — programmable steps, nested flow control, scalar/vector expressions, custom kinetic energy and persistent group caches
 - CPU stochastic integration — direct f64 state updates and per-integrator seeded random streams
 - `NonbondedForce` — cutoff/reaction field, Ewald, PME, LJPME, parameter offsets, switching and dispersion correction
 - Virtual sites — averages, out-of-plane, local coordinates, symmetry and nested dependencies
