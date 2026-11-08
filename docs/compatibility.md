@@ -54,7 +54,7 @@ revision in generated validation results.
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
 | State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; barostats remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
-| Python | Partial | Thin CPU wrappers exist, but the interface is not yet OpenMM-compatible |
+| Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; names/signatures, units and integrator binding remain incomplete |
 | Precision | Partial | CPU core supports f32 and f64; Python uses f64. GPU precision modes remain unverified |
 | GPU | Unverified | Backend features exist; force implementations currently copy positions to the host |
 | Performance | In progress | Finite-cutoff pairs use reusable cell storage, PME reuses FFT plans/workspace, and dispersion uses linear-time moments; force tensors still allocate and transfer host data |
@@ -92,17 +92,28 @@ AndersenThermostat groups particles by constraint connectivity, draws one collis
 per group with probability `1-exp(-frequency*dt)` and resamples each massive
 particle from the Maxwell distribution. Frequency is in inverse ps and temperature
 is in kelvin. Context parameters change the running values; force setters change the definition
-defaults. Rust captures defaults when constructing a Context. The current Python
-System snapshots forces at `add_force`, so later changes to the retained Python
-object do not yet affect newly constructed Contexts; shared force ownership remains
-a Python compatibility gap. Fixed particles retain their
-velocities. The Rust implementation uses a per-thermostat ChaCha12 generator:
+defaults. Rust and Python capture defaults when constructing a Context.
+Fixed particles retain their velocities. The Rust implementation uses a per-thermostat ChaCha12 generator:
 nonzero seeds reproduce Rust runs, while seed zero initializes from OS entropy.
 Cross-implementation random paths are not identical. Deterministic tests cover
 zero collision frequency, zero temperature, certain collisions, all three
 integrators, constraints, force groups, massless particles and parameter changes.
 Statistical tests separately check the collision probability, transitive groups,
 normalized first/second/fourth velocity moments and mass scaling.
+
+Python System objects retain the original force objects and expose `get_force`,
+`get_forces` and `remove_force`. Context creation snapshots the current definitions,
+including nested CV children and shared tables. Definition edits affect new
+Contexts; existing Contexts retain their captured settings until an explicit
+parameter update. A force can belong to only one System or CustomCVForce, and
+failed additions leave ownership and force lists unchanged. Reference fixtures
+compare 288 states across repeated Context creation, bond membership, groups,
+periodicity, masses, tables, nested CV parameters and thermostat defaults.
+Additional Python probes cover ownership conflicts, cycles, object retention and
+removal. Retained Python force references remain valid after their owner is removed
+or deleted and may be attached again; this is a safe lifetime extension over the
+reference wrapper, whose underlying C++ object is deleted. Integrator objects
+are still copied at Context creation and do not yet share runtime settings.
 Custom nonbonded fixtures cover all three methods, switching, overlapping and
 empty interaction groups, computed values, table updates, global changes, box
 changes and long-range corrections. Pair forces and energies use strict double
@@ -273,8 +284,8 @@ At 13,824 particles, the three-repetition measurements were:
 
 RSS is the maximum across the three processes. These results use the scripted
 coordinate workload and the Reference platform; they do not establish GPU or
-optimized OpenMM CPU performance. The current code passed all 18 reference
-fixtures with 506,447 scalar comparisons, 120 Rust tests and a build with the
+optimized OpenMM CPU performance. The current code passed all 19 reference
+fixtures with 510,911 scalar comparisons, 120 Rust tests and a build with the
 default backend feature disabled.
 
 `scripts/benchmark-cv.sh` measures a weighted mean of disjoint RG selections,

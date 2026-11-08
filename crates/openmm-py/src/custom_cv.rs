@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 pub(crate) struct PyCustomCVForce {
     inner: CustomCVForce<B>,
     variables: Vec<Py<PyAny>>,
+    force_owner: super::ownership::ForceOwner,
     tables: Vec<tabulated::SharedTable>,
 }
 
@@ -31,6 +32,7 @@ impl PyCustomCVForce {
         Ok(Self {
             inner: CustomCVForce::new(energy).map_err(|e| err(&e.to_string()))?,
             variables: Vec::new(),
+            force_owner: super::ownership::ForceOwner::default(),
             tables: Vec::new(),
         })
     }
@@ -56,9 +58,14 @@ impl PyCustomCVForce {
         Ok(self.snapshot(py)?.uses_periodic_boundary_conditions())
     }
     fn add_collective_variable(&mut self, name: &str, force: &Bound<'_, PyAny>) -> PyResult<usize> {
-        let index = self
-            .inner
-            .add_collective_variable(name, extract_force_snapshot(force)?);
+        if self.variables.len() >= 32 {
+            return Err(err(
+                "CustomCVForce cannot have more than 32 collective variables",
+            ));
+        }
+        let snapshot = extract_force_snapshot(force)?;
+        self.force_owner.claim(force)?;
+        let index = self.inner.add_collective_variable(name, snapshot);
         self.variables.push(force.clone().unbind());
         Ok(index)
     }

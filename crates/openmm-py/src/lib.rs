@@ -1,5 +1,6 @@
 mod andersen;
 mod cm_motion;
+mod ownership;
 use andersen::PyAndersenThermostat;
 use cm_motion::PyCMMotionRemover;
 mod custom_cv;
@@ -1824,9 +1825,19 @@ impl PyRBTorsionForce {
 #[pyclass(unsendable, name = "System")]
 struct PySystem {
     inner: System<B>,
+    force_objects: Vec<Py<PyAny>>,
+    force_owner: ownership::ForceOwner,
 }
 
 impl PySystem {
+    fn snapshot(&self, py: Python<'_>) -> PyResult<System<B>> {
+        let mut system = self.inner.clone();
+        for force in &self.force_objects {
+            system.add_force(extract_force_snapshot(force.bind(py))?);
+        }
+        Ok(system)
+    }
+
     fn inner_mut(&mut self) -> &mut System<B> {
         &mut self.inner
     }
@@ -1842,6 +1853,8 @@ impl PySystem {
     fn new() -> Self {
         Self {
             inner: System::new(),
+            force_objects: Vec::new(),
+            force_owner: ownership::ForceOwner::default(),
         }
     }
 
@@ -1907,7 +1920,7 @@ impl PySystem {
     }
 
     fn num_forces(&self) -> usize {
-        self.inner_ref().num_forces()
+        self.force_objects.len()
     }
 
     fn set_default_periodic_box_vectors(&mut self, a: Vec3, b: Vec3, c: Vec3) {
@@ -1927,15 +1940,49 @@ impl PySystem {
     }
 
     fn add_force(&mut self, force: &Bound<'_, PyAny>) -> PyResult<usize> {
-        Ok(self.inner_mut().add_force(extract_force_snapshot(force)?))
+        extract_force_snapshot(force)?;
+        self.force_owner.claim(force)?;
+        self.force_objects.push(force.clone().unbind());
+        Ok(self.force_objects.len() - 1)
     }
 
-    fn uses_periodic_boundary_conditions(&self) -> bool {
-        self.inner_ref().uses_periodic_boundary_conditions()
+    fn get_force(&self, index: usize, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.force_objects
+            .get(index)
+            .map(|force| force.clone_ref(py))
+            .ok_or_else(|| pyo3::exceptions::PyIndexError::new_err("force index out of range"))
+    }
+
+    fn get_forces(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
+        self.force_objects
+            .iter()
+            .map(|force| force.clone_ref(py))
+            .collect()
+    }
+
+    fn remove_force(&mut self, index: usize, py: Python<'_>) -> PyResult<()> {
+        if index >= self.force_objects.len() {
+            return Err(pyo3::exceptions::PyIndexError::new_err(
+                "force index out of range",
+            ));
+        }
+        let force = self.force_objects.remove(index);
+        self.force_owner.release(force.bind(py));
+        Ok(())
+    }
+
+    fn uses_periodic_boundary_conditions(&self, py: Python<'_>) -> PyResult<bool> {
+        for force in &self.force_objects {
+            if extract_force_snapshot(force.bind(py))?.uses_periodic_boundary_conditions() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn create_context(&self, integrator: &Bound<'_, PyAny>) -> PyResult<PyContext> {
         let device: Device = Default::default();
+        let py = integrator.py();
         let integrator: Box<dyn Integrator<B>> = if let Ok(integrator) =
             integrator.extract::<PyRef<'_, PyVerletIntegrator>>()
         {
@@ -1965,7 +2012,7 @@ impl PySystem {
         } else {
             return Err(err("unsupported integrator type"));
         };
-        let context = self.inner_ref().create_context(integrator, device);
+        let context = Context::new(self.snapshot(py)?, integrator, device);
         Ok(PyContext { inner: context })
     }
 }
