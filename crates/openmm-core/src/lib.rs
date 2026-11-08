@@ -74,3 +74,5 @@ pub use integrators::nose_hoover::{NoseHooverChain, NoseHooverIntegrator};
 
 pub use integrators::dpd::DPDIntegrator;
 pub use integrators::qtb::QTBIntegrator;
+
+pub use forces::custom_many::{CustomManyParticleForce, CustomManyParticleMethod, PermutationMode};

@@ -5,13 +5,13 @@ cd "$(dirname "$0")/.."
 reference_source="${OPENMM_SOURCE:-../openmm}"
 reference_build="target/reference-openmm"
 jobs="${SLURM_CPUS_PER_TASK:-4}"
-fixtures=(integrators nonbonded virtual_sites bonded groups molecules minimizer custom tables cmap custom_nonbonded geometry centroid hbond collective cv cm_motion andersen ownership integrator_binding barostat anisotropic_barostat membrane_barostat flexible_barostat variable_integrators compound_integrator nose_hoover dpd qtb custom_integrator gbsa_obc custom_gb lcpo gay_berne)
+fixtures=(integrators nonbonded virtual_sites bonded groups molecules minimizer custom tables cmap custom_nonbonded geometry centroid hbond collective cv cm_motion andersen ownership integrator_binding barostat anisotropic_barostat membrane_barostat flexible_barostat variable_integrators compound_integrator nose_hoover dpd qtb custom_integrator gbsa_obc custom_gb lcpo gay_berne custom_many)
 if [[ $# -gt 0 ]]; then
     fixtures=("$@")
 fi
 for fixture in "${fixtures[@]}"; do
     case "$fixture" in
-        integrators|nonbonded|virtual_sites|bonded|groups|molecules|minimizer|custom|tables|cmap|custom_nonbonded|geometry|centroid|hbond|collective|cv|cm_motion|andersen|ownership|integrator_binding|barostat|anisotropic_barostat|membrane_barostat|flexible_barostat|variable_integrators|compound_integrator|nose_hoover|dpd|qtb|custom_integrator|gbsa_obc|custom_gb|lcpo|gay_berne) ;;
+        integrators|nonbonded|virtual_sites|bonded|groups|molecules|minimizer|custom|tables|cmap|custom_nonbonded|geometry|centroid|hbond|collective|cv|cm_motion|andersen|ownership|integrator_binding|barostat|anisotropic_barostat|membrane_barostat|flexible_barostat|variable_integrators|compound_integrator|nose_hoover|dpd|qtb|custom_integrator|gbsa_obc|custom_gb|lcpo|gay_berne|custom_many) ;;
         *) echo "Unknown reference fixture: $fixture" >&2; exit 2 ;;
     esac
 done

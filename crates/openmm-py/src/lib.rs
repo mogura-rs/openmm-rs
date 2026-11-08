@@ -1,3 +1,5 @@
+mod custom_many;
+use custom_many::PyCustomManyParticleForce;
 mod custom_gb;
 use custom_gb::PyCustomGBForce;
 mod gay_berne;
@@ -1820,6 +1822,9 @@ impl PySystem {
 }
 
 fn extract_force_snapshot(force: &Bound<'_, PyAny>) -> PyResult<Box<dyn openmm_core::Force<B>>> {
+    if let Ok(force) = force.extract::<PyRef<'_, PyCustomManyParticleForce>>() {
+        return Ok(Box::new(force.snapshot()?));
+    }
     if let Ok(force) = force.extract::<PyRef<'_, PyGayBerneForce>>() {
         return Ok(Box::new(force.inner.clone()));
     }
@@ -2189,6 +2194,12 @@ impl PyContext {
                 .update_custom_gb_force_parameters(force_index, &force.snapshot()?);
             return Ok(());
         }
+        if let Ok(force) = force.extract::<PyRef<'_, PyCustomManyParticleForce>>() {
+            self.inner
+                .borrow_mut()
+                .update_custom_many_particle_force_parameters(force_index, &force.snapshot()?);
+            return Ok(());
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyGayBerneForce>>() {
             self.inner
                 .borrow_mut()
@@ -2300,6 +2311,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     lcpo::register(m)?;
     gay_berne::register(m)?;
     custom_gb::register(m)?;
+    custom_many::register(m)?;
     m.add_class::<PyNonbondedForce>()?;
     m.add_class::<PyCustomExternalForce>()?;
     m.add_class::<PyCustomBondForce>()?;

@@ -9,6 +9,7 @@ pub(crate) struct DerivativeProgram {
     varying: Vec<(usize, Instruction)>,
     reverse: Vec<ReverseStep>,
     function_derivatives: Vec<f64>,
+    periodic_box: Option<[[f64; 3]; 3]>,
 }
 
 enum ReverseStep {
@@ -100,7 +101,11 @@ impl DerivativeProgram {
             varying,
             reverse,
             function_derivatives,
+            periodic_box: None,
         }
+    }
+    pub(crate) fn set_periodic_box(&mut self, vectors: Option<&[[f64; 3]; 3]>) {
+        self.periodic_box = vectors.copied();
     }
     pub(crate) fn set(&mut self, index: usize, value: f64) {
         self.values[self.inputs[index]] = value;
@@ -111,6 +116,7 @@ impl DerivativeProgram {
             &mut self.values,
             &mut self.function_derivatives,
             &self.constants,
+            self.periodic_box.as_ref(),
         );
     }
     pub(crate) fn value(&mut self) -> f64 {
@@ -119,6 +125,7 @@ impl DerivativeProgram {
             &mut self.values,
             &mut self.function_derivatives,
             &self.varying,
+            self.periodic_box.as_ref(),
         );
         *self.values.last().unwrap()
     }
@@ -176,6 +183,7 @@ impl DerivativeProgram {
         values: &mut [f64],
         derivatives: &mut [f64],
         instructions: &[(usize, Instruction)],
+        periodic_box: Option<&[[f64; 3]; 3]>,
     ) {
         for &(index, instruction) in instructions {
             values[index] = match instruction {
@@ -200,7 +208,8 @@ impl DerivativeProgram {
                             value
                         }
                         FunctionBinding::Geometry(function) => {
-                            let (value, gradient) = function.evaluate(&arguments[..count], None);
+                            let (value, gradient) =
+                                function.evaluate(&arguments[..count], periodic_box);
                             partials.copy_from_slice(&gradient[..count]);
                             value
                         }
@@ -215,6 +224,55 @@ impl DerivativeProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scheduled_geometry_tracks_periodic_boxes_and_constant_subexpressions() {
+        let vectors = [[2.0, 0.0, 0.0], [0.4, 2.2, 0.0], [-0.3, 0.2, 2.4]];
+        for source in [
+            "a*distance(p1,p2)+angle(p1,p2,p3)+cos(dihedral(p1,p2,p3,p4))",
+            "pointdistance(x1,y1,z1,(x2+x3)/2,(y2+y3)/2,(z2+z3)/2)",
+            "pointdistance(a,0,0,0,0,0)+distance(p1,p4)",
+        ] {
+            let expression = Expression::parse_geometric(source, Some(('p', 4))).unwrap();
+            let varying: Vec<_> = expression
+                .variables
+                .iter()
+                .map(|name| name != "a")
+                .collect();
+            let mut program =
+                DerivativeProgram::new(expression.clone(), &varying, 0..varying.len());
+            let mut ordinary = expression.workspace();
+            let coordinates = [0.2, 0.3, 0.1, 0.6, 0.1, 0.4, 1.4, 1.2, 0.7, 1.1, 1.8, 0.3];
+            for periodic in [true, false, true] {
+                let vectors = periodic.then_some(&vectors);
+                program.set_periodic_box(vectors);
+                ordinary.set_periodic_box(vectors);
+                for (index, name) in expression.variables.iter().enumerate() {
+                    let value = if name == "a" {
+                        1.7
+                    } else {
+                        let particle: usize = name[1..].parse().unwrap();
+                        let axis = match name.as_bytes()[0] {
+                            b'x' => 0,
+                            b'y' => 1,
+                            _ => 2,
+                        };
+                        coordinates[3 * (particle - 1) + axis]
+                    };
+                    program.set(index, value);
+                    ordinary.set(Some(index), value);
+                }
+                program.prepare();
+                let expected = expression.evaluate(&mut ordinary);
+                assert!((program.evaluate() - expected).abs() < 1e-13);
+                for index in 0..varying.len() {
+                    assert!(
+                        (program.derivative(index) - ordinary.derivative(Some(index))).abs()
+                            < 1e-12
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn scheduled_derivatives_preserve_dynamic_globals_and_shared_subexpressions() {
         for source in [

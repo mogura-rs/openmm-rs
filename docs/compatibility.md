@@ -49,7 +49,7 @@ revision in generated validation results.
 | Bonded forces | Partial | Harmonic bonds/angles, periodic/RB torsions and CMAP have analytic forces and reference comparisons; broader API validation and GPU execution remain |
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
-| Custom forces | Partial | Eleven force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond, GB and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
+| Custom forces | Partial | Twelve force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond, GB, many-particle and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Implicit solvation | Partial | GBSA-OBC and programmable CustomGB support polar/surface forces, three cutoff methods, particle updates, cell traversal and nested CV use; application parameter assignment and resident GPU execution remain |
 | Anisotropic particles | Partial | Gay-Berne energies, conservative orientation forces, exceptions and live updates are implemented; source-force exceptions are explicit; resident GPU execution remains |
 | Surface area | Partial | LCPO overlap energies, analytic forces, periodic distances and parameter updates are implemented; application parameter assignment and resident GPU execution remain |
@@ -1745,6 +1745,160 @@ cells also avoid Reference's scan of all particle pairs. NoCutoff remains
 quadratic. The gains for small systems are sensitive to process startup, CPU
 frequency and scheduling; the generated summaries retain each repetition.
 
+## Programmable many-particle interactions
+
+`CustomManyParticleForce` evaluates arbitrary set sizes with compiled coordinate,
+distance, angle, dihedral and point-function expressions, global/per-particle
+parameters and all six tabulated-function types. The CPU core supports f64/f32;
+the Python wrapper provides snake_case and OpenMM-style force method names,
+integer particle types, set-valued type filters, exclusions and live updates.
+This class has no source API for requesting global energy derivatives. As in
+Reference, a nested CV does not acquire derivatives of its child's global
+parameters unless that child force provides them.
+
+`SinglePermutation` evaluates each unordered set once. With a cutoff, every pair
+in the set must be closer than the cutoff. `UniqueCentralParticle` fixes p1 as
+the center and evaluates unordered choices of the remaining particles around it;
+only distances from the center determine the cutoff. Exclusions apply to every
+pair, including two noncentral particles. The energy must be symmetric under any
+remaining allowed relabeling, as required by the source API. Type filters select
+the first valid ordering in the source's recursive swap order.
+
+The implementation preserves the supplied Reference's single-order filter
+behavior: filters are bypassed for one-particle expressions in either mode, and
+for two-particle expressions in `UniqueCentralParticle` mode. The original source
+has only one possible ordering in these cases and skips its rejection lookup.
+Permanent source probes with three particles of type 0, a filter allowing only
+type 1 and constant energy 1 produce energies 3 for one-particle sets and 6 for
+central pairs. Two-particle `SinglePermutation` and both three-particle modes
+correctly produce zero. This discrepancy from the header is deliberately recorded;
+it is not described as successful filtering.
+
+### Captured parameters and table updates
+
+Context creation captures the expression, particle types, filters, exclusions,
+permutation mode and cutoff behavior. Ordinary updates copy numeric per-particle
+values. A changed table update count reconstructs the supplied Reference's whole
+interaction, so Rust also reloads the expression, particle types, filters,
+exclusions, permutation mode, cutoff method and distance at that point. Existing
+Context global values remain unchanged by modified definition defaults. Changed
+table node counts and ranges are accepted, matching the actual Reference code.
+
+The original Reference kernel separately captures whether it must supply periodic
+box vectors and the cutoff used for its outer box check. Reconstructing the
+interaction does not replace those captured fields. Rust preserves them. Thus an
+already nonperiodic Context can reload `NoCutoff` or `CutoffNonPeriodic` settings,
+and a periodic Context validates both captured and reloaded cutoff limits. Rust
+rejects changes that would introduce periodic evaluation without a captured box,
+or remove the cutoff from an already periodic interaction; the source reaches
+uninitialized box data or an assertion for those inconsistent transitions.
+Create a new Context to change that periodicity contract.
+
+A periodic-to-nonperiodic cutoff reload retains periodic neighbor selection but
+rebuilds geometric functions as nonperiodic. This mixed behavior also follows
+the source. With a 3 nm box, particles at x=0 and x=2.8 nm, cutoff 0.9 nm and
+energy `distance(p1,p2)+t(0)`, changing the method and raising the table from zero
+to one changes the energy from 0.2 to 3.8 kJ/mol and the first x force from -1 to
++1 kJ/mol/nm. A permanent source probe records both results.
+
+### Enumeration, expression evaluation and memory
+
+No full set list is constructed. Cutoff pair interactions stream cell candidates
+directly. Larger sets use a reusable sparse neighbor graph: single-permutation
+sets are cliques, and central-particle sets are combinations of center neighbors.
+Excluded pairs prune the search before expression evaluation. NoCutoff retains
+combinatorial cost, but its enumeration needs only a particle-index vector and
+scratch proportional to set size.
+
+Type matching searches valid permutations as needed, without allocating all
+permutations or the source's table of all type combinations. Per-particle values
+use contiguous storage. Expression inputs are bound once; a scheduled reverse
+pass computes coordinate derivatives, and global-only terms are prepared once
+per force evaluation. Periodic point functions receive the current box, including
+when their other inputs are constant.
+
+The neighbor graph uses O(N+E) storage, where E is the number of accepted cutoff
+pairs. Dense physical neighborhoods can still make E quadratic; the implementation
+does not promise linear memory regardless of density. A 4,096-particle allocation
+test assigns every particle a distinct type and evaluates three-body interactions
+at fixed density. It rejects any single allocation larger than 512 bytes per
+particle, checks one returned-force allocation after warmup, and verifies no new
+dense allocation during warmed host accumulation. This is an allocation bound,
+not the sum of all buffers or total process RSS.
+
+### Many-particle numerical coverage
+
+The initial reference fixture covers 1,728 states and 131,328 scalar comparisons:
+set sizes one through four, both permutation modes, all three cutoff methods,
+three filter patterns, direct/nested CV use, four update/trajectory phases and
+three force-group queries. It includes a fixed particle, an out-of-plane virtual
+site, arbitrary signed type codes, changed exclusions and type assignments,
+changed table dimensions, changed expressions/modes and periodic image shifts.
+Maximum errors are 9.10e-13 kJ/mol in potential energy, 2.28e-13 kJ/mol/nm in force,
+8.89e-16 nm in positions and 5.38e-11 nm/ps in velocities. Another 3,024 independent
+force components use finite differences of the original source energy; their
+maximum error is 9.86e-7 kJ/mol/nm.
+
+Rust tests independently distinguish neighbor stars from cliques, verify exclusion
+of noncentral pairs, exercise type-selected roles and compare geometry forces with
+energy gradients. They also cover f32, sparse bond exclusions, table-triggered
+recapture, one-particle behavior, arbitrary set sizes and cutoff rounding. The
+cutoff predicate follows Reference's square-root distance comparison; squaring the
+cutoff instead can include a pair whose computed distance is exactly on the boundary.
+
+Four eight-particle systems run 25,000 Verlet steps at 0.0002 ps, for 5 ps each,
+covering both permutation modes with and without periodic cutoffs. Harmonic bonds
+keep every pair below 0.255 nm, well inside the 0.9 nm cutoff. The largest total
+energy variation is 4.40e-7 kJ/mol in both implementations. At 0.1 ps, position and
+velocity differences are below 1.07e-13 nm and 1.41e-12 nm/ps; at 5 ps, the recorded
+maxima are 2.04e-11 nm and 7.67e-12 nm/ps. Rust's final total-momentum error is below
+4.02e-15 Da nm/ps, and the source error is below 2.66e-10 Da nm/ps. These restrained
+synthetic systems check deterministic integration away from cutoff crossings;
+they do not establish liquid sampling or long-time thermodynamic convergence.
+
+### Many-particle performance
+
+`scripts/benchmark-custom-many.sh` measures f64 three-particle force/energy queries
+on a jittered 0.32 nm lattice. The first model uses a symmetric exponential of the
+three pair distances; the second uses a central-particle angular expression.
+Per-particle amplitudes vary by index and lambda is 0.7. Cutoff methods use 0.65 nm.
+NoCutoff measures 32/64/128 particles; cutoff methods measure 128/256/512.
+
+Each condition has one warmup and three processes. Timed query counts are 16/4/1
+for NoCutoff and 10/3/1 for cutoffs, in increasing particle-count order. The table
+gives median queries/s and the largest process peak RSS. Construction is excluded
+from timing; RSS includes Context storage, force workspaces and runtime overhead.
+Energy and squared force norm are checked for every measured process.
+
+| Model | Method | Particles | Rust queries/s | Reference queries/s | Rust peak KiB | Reference peak KiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Symmetric triples | NoCutoff | 32 | 411.506 | 16.115 | 4,216 | 7,704 |
+| Symmetric triples | NoCutoff | 64 | 70.792 | 1.956 | 4,268 | 7,548 |
+| Symmetric triples | NoCutoff | 128 | 8.676 | 0.236 | 4,244 | 7,532 |
+| Symmetric triples | Nonperiodic cutoff | 128 | 522.833 | 16.564 | 4,480 | 7,504 |
+| Symmetric triples | Nonperiodic cutoff | 256 | 247.177 | 4.826 | 4,424 | 7,488 |
+| Symmetric triples | Nonperiodic cutoff | 512 | 77.089 | 1.051 | 4,688 | 7,760 |
+| Symmetric triples | Periodic cutoff | 128 | 337.917 | 9.301 | 4,476 | 7,780 |
+| Symmetric triples | Periodic cutoff | 256 | 152.198 | 2.564 | 4,464 | 7,472 |
+| Symmetric triples | Periodic cutoff | 512 | 58.406 | 0.498 | 4,680 | 7,952 |
+| Central triples | NoCutoff | 32 | 144.049 | 2.305 | 4,304 | 7,936 |
+| Central triples | NoCutoff | 64 | 17.339 | 0.274 | 4,232 | 7,984 |
+| Central triples | NoCutoff | 128 | 2.123 | 0.033 | 4,440 | 7,940 |
+| Central triples | Nonperiodic cutoff | 128 | 91.166 | 1.383 | 4,492 | 8,008 |
+| Central triples | Nonperiodic cutoff | 256 | 34.859 | 0.490 | 4,528 | 8,016 |
+| Central triples | Nonperiodic cutoff | 512 | 15.398 | 0.169 | 4,772 | 8,020 |
+| Central triples | Periodic cutoff | 128 | 50.418 | 0.763 | 4,512 | 7,956 |
+| Central triples | Periodic cutoff | 256 | 20.460 | 0.283 | 4,488 | 7,948 |
+| Central triples | Periodic cutoff | 512 | 8.138 | 0.086 | 4,720 | 7,992 |
+
+Reference enumerates particle triples even with a cutoff. Rust prunes the search
+using sparse neighbor cliques or center-neighbor combinations and reuses its
+compiled derivative workspace. NoCutoff still has cubic cost for these models.
+The generated summaries retain individual repetitions and timing ranges, including
+variation from scheduling and CPU frequency. These are synthetic Reference-platform
+force queries; optimized OpenMM CPU/GPU platforms and complete MD throughput are
+outside this measurement.
+
 ## Documentation discrepancies found during implementation
 
 - All four Monte Carlo barostat constructor comments call the rigid scaling center a
@@ -1866,6 +2020,19 @@ frequency and scheduling; the generated summaries retain each repetition.
 - Its spherical Lennard-Jones equivalence claim omits the equal-sigma condition.
   Unequal diameters retain a different contact distance and shape prefactor, which
   Rust preserves and checks with the source energy probe.
+
+- `CustomManyParticleForce.h` describes type filtering without the Reference
+  implementation's single-order bypass. One-particle sets and two-particle
+  central interactions ignore those filters; Rust preserves the source behavior.
+- Its update description says expressions, exclusions, modes and cutoffs remain
+  unchanged, and restricts tables to their old nodes/ranges. A changed table update
+  count actually reconstructs the interaction, including those definitions and
+  particle types. Only the kernel's outer periodic flag and box-check cutoff stay
+  captured. Rust follows those measured update boundaries and rejects inconsistent
+  periodic transitions that are undefined in the source.
+- The nonbonded-method enum comments describe an all-pairs cutoff without stating
+  the central-mode exception. The detailed class description and implementation
+  apply center distances only in `UniqueCentralParticle` mode.
 
 Implementation and reference tests take precedence over outdated descriptions.
 
