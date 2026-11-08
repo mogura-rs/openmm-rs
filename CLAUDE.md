@@ -153,7 +153,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - RMSD, radius of gyration and orientation restraint — quaternion alignment and analytic forces
 - CustomCVForce — nested force composition and analytic chain-rule derivatives
 - CMMotionRemover and AndersenThermostat — ordered velocity updates, constraint-group collisions and runtime thermostat parameters
-- Python wrappers — partial snake_case CPU interface with retained force definitions, Context snapshots and single-owner checks
+- Python wrappers — partial snake_case CPU interface with retained force definitions, Context snapshots, single-owner checks and shared runtime integrator settings
 
 ### Next
 1. Complete the compatibility checklist in `docs/compatibility.md`.

@@ -1,5 +1,6 @@
 mod andersen;
 mod cm_motion;
+mod integrators;
 mod ownership;
 use andersen::PyAndersenThermostat;
 use cm_motion::PyCMMotionRemover;
@@ -29,9 +30,8 @@ use openmm_core::forces::custom_torsion::CustomTorsionForce;
 use openmm_core::forces::periodic_torsion::TorsionParam;
 use openmm_core::forces::rb_torsion::RBTorsionParam;
 use openmm_core::{
-    BrownianIntegrator, Context, HarmonicAngleForce, HarmonicBondForce, Integrator,
-    LangevinMiddleIntegrator, NonbondedForce, NonbondedMethod, PeriodicTorsionForce,
-    RBTorsionForce, State, StateFlags, System, VerletIntegrator,
+    HarmonicAngleForce, HarmonicBondForce, NonbondedForce, NonbondedMethod, PeriodicTorsionForce,
+    RBTorsionForce, State, StateFlags, System,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -192,188 +192,6 @@ impl PyState {
     #[getter]
     fn kinetic_energy(&self) -> Option<f64> {
         self.kinetic_energy
-    }
-}
-
-#[pyclass(unsendable, name = "VerletIntegrator")]
-struct PyVerletIntegrator {
-    step_size: f64,
-    groups: u32,
-    tolerance: f64,
-}
-
-#[pymethods]
-impl PyVerletIntegrator {
-    fn get_integration_force_groups(&self) -> i32 {
-        self.groups as i32
-    }
-    fn set_integration_force_groups(&mut self, groups: i64) -> PyResult<()> {
-        self.groups = group_mask(groups)?;
-        Ok(())
-    }
-    fn get_constraint_tolerance(&self) -> f64 {
-        self.tolerance
-    }
-    fn set_constraint_tolerance(&mut self, tolerance: f64) -> PyResult<()> {
-        if !tolerance.is_finite() || tolerance <= 0.0 || tolerance >= 1.0 {
-            return Err(err("constraint tolerance must be between zero and one"));
-        }
-        self.tolerance = tolerance;
-        Ok(())
-    }
-
-    #[new]
-    fn new(step_size: f64) -> Self {
-        Self {
-            step_size,
-            groups: u32::MAX,
-            tolerance: 1e-5,
-        }
-    }
-
-    #[getter]
-    fn step_size(&self) -> f64 {
-        self.step_size
-    }
-
-    fn set_step_size(&mut self, step_size: f64) {
-        self.step_size = step_size;
-    }
-}
-
-#[pyclass(unsendable, name = "LangevinMiddleIntegrator")]
-struct PyLangevinMiddleIntegrator {
-    temperature: f64,
-    friction: f64,
-    step_size: f64,
-    groups: u32,
-    tolerance: f64,
-}
-
-#[pymethods]
-impl PyLangevinMiddleIntegrator {
-    fn get_integration_force_groups(&self) -> i32 {
-        self.groups as i32
-    }
-    fn set_integration_force_groups(&mut self, groups: i64) -> PyResult<()> {
-        self.groups = group_mask(groups)?;
-        Ok(())
-    }
-    fn get_constraint_tolerance(&self) -> f64 {
-        self.tolerance
-    }
-    fn set_constraint_tolerance(&mut self, tolerance: f64) -> PyResult<()> {
-        if !tolerance.is_finite() || tolerance <= 0.0 || tolerance >= 1.0 {
-            return Err(err("constraint tolerance must be between zero and one"));
-        }
-        self.tolerance = tolerance;
-        Ok(())
-    }
-
-    #[new]
-    fn new(temperature: f64, friction: f64, step_size: f64) -> Self {
-        Self {
-            temperature,
-            friction,
-            step_size,
-            groups: u32::MAX,
-            tolerance: 1e-5,
-        }
-    }
-
-    #[getter]
-    fn temperature(&self) -> f64 {
-        self.temperature
-    }
-
-    #[getter]
-    fn friction(&self) -> f64 {
-        self.friction
-    }
-
-    #[getter]
-    fn step_size(&self) -> f64 {
-        self.step_size
-    }
-
-    fn set_temperature(&mut self, temperature: f64) {
-        self.temperature = temperature;
-    }
-
-    fn set_friction(&mut self, friction: f64) {
-        self.friction = friction;
-    }
-
-    fn set_step_size(&mut self, step_size: f64) {
-        self.step_size = step_size;
-    }
-}
-
-#[pyclass(unsendable, name = "BrownianIntegrator")]
-struct PyBrownianIntegrator {
-    temperature: f64,
-    friction: f64,
-    step_size: f64,
-    groups: u32,
-    tolerance: f64,
-}
-
-#[pymethods]
-impl PyBrownianIntegrator {
-    fn get_integration_force_groups(&self) -> i32 {
-        self.groups as i32
-    }
-    fn set_integration_force_groups(&mut self, groups: i64) -> PyResult<()> {
-        self.groups = group_mask(groups)?;
-        Ok(())
-    }
-    fn get_constraint_tolerance(&self) -> f64 {
-        self.tolerance
-    }
-    fn set_constraint_tolerance(&mut self, tolerance: f64) -> PyResult<()> {
-        if !tolerance.is_finite() || tolerance <= 0.0 || tolerance >= 1.0 {
-            return Err(err("constraint tolerance must be between zero and one"));
-        }
-        self.tolerance = tolerance;
-        Ok(())
-    }
-
-    #[new]
-    fn new(temperature: f64, friction: f64, step_size: f64) -> Self {
-        Self {
-            temperature,
-            friction,
-            step_size,
-            groups: u32::MAX,
-            tolerance: 1e-5,
-        }
-    }
-
-    #[getter]
-    fn temperature(&self) -> f64 {
-        self.temperature
-    }
-
-    #[getter]
-    fn friction(&self) -> f64 {
-        self.friction
-    }
-
-    #[getter]
-    fn step_size(&self) -> f64 {
-        self.step_size
-    }
-
-    fn set_temperature(&mut self, temperature: f64) {
-        self.temperature = temperature;
-    }
-
-    fn set_friction(&mut self, friction: f64) {
-        self.friction = friction;
-    }
-
-    fn set_step_size(&mut self, step_size: f64) {
-        self.step_size = step_size;
     }
 }
 
@@ -1980,40 +1798,8 @@ impl PySystem {
         Ok(false)
     }
 
-    fn create_context(&self, integrator: &Bound<'_, PyAny>) -> PyResult<PyContext> {
-        let device: Device = Default::default();
-        let py = integrator.py();
-        let integrator: Box<dyn Integrator<B>> = if let Ok(integrator) =
-            integrator.extract::<PyRef<'_, PyVerletIntegrator>>()
-        {
-            let mut core = VerletIntegrator::new(integrator.step_size);
-            core.set_constraint_tolerance(integrator.tolerance);
-            core.set_integration_force_groups(integrator.groups);
-            Box::new(core)
-        } else if let Ok(integrator) = integrator.extract::<PyRef<'_, PyLangevinMiddleIntegrator>>()
-        {
-            let mut core = LangevinMiddleIntegrator::new(
-                integrator.temperature,
-                integrator.friction,
-                integrator.step_size,
-            );
-            core.set_constraint_tolerance(integrator.tolerance);
-            core.set_integration_force_groups(integrator.groups);
-            Box::new(core)
-        } else if let Ok(integrator) = integrator.extract::<PyRef<'_, PyBrownianIntegrator>>() {
-            let mut core = BrownianIntegrator::new(
-                integrator.temperature,
-                integrator.friction,
-                integrator.step_size,
-            );
-            core.set_constraint_tolerance(integrator.tolerance);
-            core.set_integration_force_groups(integrator.groups);
-            Box::new(core)
-        } else {
-            return Err(err("unsupported integrator type"));
-        };
-        let context = Context::new(self.snapshot(py)?, integrator, device);
-        Ok(PyContext { inner: context })
+    fn create_context(slf: PyRef<'_, Self>, integrator: &Bound<'_, PyAny>) -> PyResult<PyContext> {
+        integrators::create_context(slf.into(), integrator)
     }
 }
 
@@ -2093,9 +1879,11 @@ fn extract_force_snapshot(force: &Bound<'_, PyAny>) -> PyResult<Box<dyn openmm_c
     Err(err("unsupported force type"))
 }
 
-#[pyclass(unsendable, name = "Context")]
+#[pyclass(unsendable, weakref, name = "Context")]
 struct PyContext {
-    inner: Context<B>,
+    inner: integrators::SharedContext,
+    system: Py<PySystem>,
+    integrator: Py<PyAny>,
 }
 
 #[pyclass(name = "MinimizationResult", get_all)]
@@ -2115,27 +1903,47 @@ impl PyLocalEnergyMinimizer {
     #[staticmethod]
     #[pyo3(signature = (context, tolerance=10.0, max_iterations=0))]
     fn minimize(
-        mut context: PyRefMut<'_, PyContext>,
+        context: PyRef<'_, PyContext>,
         tolerance: f64,
         max_iterations: usize,
     ) -> PyResult<()> {
-        openmm_core::LocalEnergyMinimizer::minimize(&mut context.inner, tolerance, max_iterations)
-            .map_err(|error| err(&error.to_string()))?;
+        openmm_core::LocalEnergyMinimizer::minimize(
+            &mut context.inner.borrow_mut(),
+            tolerance,
+            max_iterations,
+        )
+        .map_err(|error| err(&error.to_string()))?;
         Ok(())
     }
 }
 
 #[pymethods]
 impl PyContext {
+    #[new]
+    fn new(system: Py<PySystem>, integrator: &Bound<'_, PyAny>) -> PyResult<Self> {
+        integrators::create_context(system, integrator)
+    }
+
+    fn get_system(&self, py: Python<'_>) -> Py<PySystem> {
+        self.system.clone_ref(py)
+    }
+
+    fn get_integrator(&self, py: Python<'_>) -> Py<PyAny> {
+        self.integrator.clone_ref(py)
+    }
+
     #[pyo3(signature = (tolerance=10.0, max_iterations=0))]
     fn minimize(
         &mut self,
         tolerance: f64,
         max_iterations: usize,
     ) -> PyResult<PyMinimizationResult> {
-        let result =
-            openmm_core::LocalEnergyMinimizer::minimize(&mut self.inner, tolerance, max_iterations)
-                .map_err(|error| err(&error.to_string()))?;
+        let result = openmm_core::LocalEnergyMinimizer::minimize(
+            &mut self.inner.borrow_mut(),
+            tolerance,
+            max_iterations,
+        )
+        .map_err(|error| err(&error.to_string()))?;
         Ok(PyMinimizationResult {
             iterations: result.iterations,
             energy: result.energy,
@@ -2145,81 +1953,91 @@ impl PyContext {
         })
     }
     fn get_molecules(&self) -> Vec<Vec<usize>> {
-        self.inner.molecules().to_vec()
+        self.inner.borrow().molecules().to_vec()
     }
     fn compute_virtual_sites(&mut self) {
-        self.inner.compute_virtual_sites();
+        self.inner.borrow_mut().compute_virtual_sites();
     }
 
     fn apply_constraints(&mut self, tolerance: f64) -> PyResult<()> {
         self.inner
+            .borrow_mut()
             .apply_constraints(tolerance)
             .map_err(|error| err(&error.to_string()))
     }
 
     fn apply_velocity_constraints(&mut self, tolerance: f64) -> PyResult<()> {
         self.inner
+            .borrow_mut()
             .apply_velocity_constraints(tolerance)
             .map_err(|error| err(&error.to_string()))
     }
 
     fn set_positions(&mut self, positions: Vec<Vec3>) {
         let device: Device = Default::default();
-        self.inner.set_positions(to_tensor3(&positions, &device));
+        self.inner
+            .borrow_mut()
+            .set_positions(to_tensor3(&positions, &device));
     }
 
     fn set_velocities(&mut self, velocities: Vec<Vec3>) {
         let device: Device = Default::default();
-        self.inner.set_velocities(to_tensor3(&velocities, &device));
+        self.inner
+            .borrow_mut()
+            .set_velocities(to_tensor3(&velocities, &device));
     }
 
     fn set_velocities_to_temperature(&mut self, temperature: f64) {
-        self.inner.set_velocities_to_temperature(temperature);
+        self.inner
+            .borrow_mut()
+            .set_velocities_to_temperature(temperature);
     }
 
     fn set_state(&mut self, state: &PyState) -> PyResult<()> {
         let device: Device = Default::default();
         let state = state.to_core(&device)?;
-        self.inner.set_state(&state);
+        self.inner.borrow_mut().set_state(&state);
         Ok(())
     }
 
     fn set_parameter(&mut self, name: &str, value: f64) {
-        self.inner.set_parameter(name, value);
+        self.inner.borrow_mut().set_parameter(name, value);
     }
 
     fn get_parameter(&self, name: &str) -> f64 {
-        self.inner.get_parameter(name)
+        self.inner.borrow().get_parameter(name)
     }
 
     fn get_parameters(&self) -> HashMap<String, f64> {
-        self.inner.get_parameters().clone()
+        self.inner.borrow().get_parameters().clone()
     }
 
     fn set_time(&mut self, time: f64) {
-        self.inner.set_time(time);
+        self.inner.borrow_mut().set_time(time);
     }
 
     #[getter]
     fn time(&self) -> f64 {
-        self.inner.get_time()
+        self.inner.borrow().get_time()
     }
 
     fn set_step_count(&mut self, step_count: u64) {
-        self.inner.set_step_count(step_count);
+        self.inner.borrow_mut().set_step_count(step_count);
     }
 
     #[getter]
     fn step_count(&self) -> u64 {
-        self.inner.get_step_count()
+        self.inner.borrow().get_step_count()
     }
 
     fn set_periodic_box_vectors(&mut self, a: Vec3, b: Vec3, c: Vec3) {
-        self.inner.set_periodic_box_vectors(to_box_vectors(a, b, c));
+        self.inner
+            .borrow_mut()
+            .set_periodic_box_vectors(to_box_vectors(a, b, c));
     }
 
     fn get_periodic_box_vectors(&self) -> Option<Vec<Vec3>> {
-        self.inner.periodic_box_vectors().map(|vectors| {
+        self.inner.borrow().periodic_box_vectors().map(|vectors| {
             vectors
                 .iter()
                 .map(|v| (v[0], v[1], v[2]))
@@ -2228,7 +2046,7 @@ impl PyContext {
     }
 
     fn get_collective_variable_values(&self, force_index: usize) -> Vec<f64> {
-        self.inner.collective_variable_values(force_index)
+        self.inner.borrow().collective_variable_values(force_index)
     }
     fn update_force_parameters_at_path(
         &mut self,
@@ -2237,6 +2055,7 @@ impl PyContext {
     ) -> PyResult<()> {
         let force = extract_force_snapshot(force)?;
         self.inner
+            .borrow_mut()
             .update_force_parameters_at_path(&path, force.as_ref())
             .map_err(|e| err(&e))
     }
@@ -2247,96 +2066,113 @@ impl PyContext {
     ) -> PyResult<()> {
         if let Ok(cv) = force.extract::<PyRef<'_, PyCustomCVForce>>() {
             self.inner
+                .borrow_mut()
                 .update_force_parameters_at_path(&[force_index], &cv.snapshot(force.py())?)
                 .map_err(|e| err(&e))?;
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyRMSDForce>>() {
             self.inner
+                .borrow_mut()
                 .update_rmsd_force_parameters(force_index, &force.inner);
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyOrientationRestraintForce>>() {
             self.inner
+                .borrow_mut()
                 .update_orientation_restraint_force_parameters(force_index, &force.inner);
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomHbondForce>>() {
             self.inner
+                .borrow_mut()
                 .update_custom_hbond_force_parameters(force_index, &force.snapshot());
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomCentroidBondForce>>() {
             self.inner
+                .borrow_mut()
                 .update_custom_centroid_force_parameters(force_index, &force.snapshot());
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomCompoundBondForce>>() {
             self.inner
+                .borrow_mut()
                 .update_custom_compound_force_parameters(force_index, &force.snapshot());
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCMAPTorsionForce>>() {
             self.inner
+                .borrow_mut()
                 .update_cmap_torsion_force_parameters(force_index, &force.inner);
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomExternalForce>>() {
             let inner = &force.inner;
             self.inner
+                .borrow_mut()
                 .update_custom_external_force_parameters(force_index, inner);
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomBondForce>>() {
             let inner = &force.inner;
             self.inner
+                .borrow_mut()
                 .update_custom_bond_force_parameters(force_index, inner);
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomAngleForce>>() {
             let inner = &force.inner;
             self.inner
+                .borrow_mut()
                 .update_custom_angle_force_parameters(force_index, inner);
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomNonbondedForce>>() {
             self.inner
+                .borrow_mut()
                 .update_custom_nonbonded_force_parameters(force_index, &force.snapshot());
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomTorsionForce>>() {
             let inner = &force.inner;
             self.inner
+                .borrow_mut()
                 .update_custom_torsion_force_parameters(force_index, inner);
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyNonbondedForce>>() {
             let inner = &force.inner;
             self.inner
+                .borrow_mut()
                 .update_nonbonded_force_parameters(force_index, inner);
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyHarmonicBondForce>>() {
             let inner = &force.inner;
             self.inner
+                .borrow_mut()
                 .update_harmonic_bond_force_parameters(force_index, inner);
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyHarmonicAngleForce>>() {
             let inner = &force.inner;
             self.inner
+                .borrow_mut()
                 .update_harmonic_angle_force_parameters(force_index, inner);
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyPeriodicTorsionForce>>() {
             let inner = &force.inner;
             self.inner
+                .borrow_mut()
                 .update_periodic_torsion_force_parameters(force_index, inner);
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyRBTorsionForce>>() {
             let inner = &force.inner;
             self.inner
+                .borrow_mut()
                 .update_rb_torsion_force_parameters(force_index, inner);
             return Ok(());
         }
@@ -2347,6 +2183,7 @@ impl PyContext {
 
     fn step(&mut self, steps: usize) -> PyResult<()> {
         self.inner
+            .borrow_mut()
             .try_step(steps)
             .map_err(|error| err(&error.to_string()))
     }
@@ -2364,7 +2201,7 @@ impl PyContext {
         groups: i64,
         enforce_periodic_box: bool,
     ) -> PyResult<PyState> {
-        Ok(PyState::from_core(self.inner.get_state_options(
+        Ok(PyState::from_core(self.inner.borrow().get_state_options(
             StateFlags {
                 positions,
                 velocities,
@@ -2385,9 +2222,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMinimizationResult>()?;
     virtual_sites::register(m)?;
     m.add_class::<PyState>()?;
-    m.add_class::<PyVerletIntegrator>()?;
-    m.add_class::<PyLangevinMiddleIntegrator>()?;
-    m.add_class::<PyBrownianIntegrator>()?;
+    integrators::register(m)?;
     m.add_class::<PyNonbondedForce>()?;
     m.add_class::<PyCustomExternalForce>()?;
     m.add_class::<PyCustomBondForce>()?;

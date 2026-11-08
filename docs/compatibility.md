@@ -54,7 +54,7 @@ revision in generated validation results.
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
 | State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; barostats remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
-| Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; names/signatures, units and integrator binding remain incomplete |
+| Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; integrator settings are shared with the bound Context; broader names/signatures, units and platform selection remain incomplete |
 | Precision | Partial | CPU core supports f32 and f64; Python uses f64. GPU precision modes remain unverified |
 | GPU | Unverified | Backend features exist; force implementations currently copy positions to the host |
 | Performance | In progress | Finite-cutoff pairs use reusable cell storage, PME reuses FFT plans/workspace, and dispersion uses linear-time moments; force tensors still allocate and transfer host data |
@@ -112,8 +112,31 @@ periodicity, masses, tables, nested CV parameters and thermostat defaults.
 Additional Python probes cover ownership conflicts, cycles, object retention and
 removal. Retained Python force references remain valid after their owner is removed
 or deleted and may be attached again; this is a safe lifetime extension over the
-reference wrapper, whose underlying C++ object is deleted. Integrator objects
-are still copied at Context creation and do not yet share runtime settings.
+reference wrapper, whose underlying C++ object is deleted.
+
+Python Verlet, LFMiddle and Brownian integrators share their settings with their
+bound Context. Step size, tolerance, force-group masks, temperature and friction
+setters affect subsequent execution and state queries. `Context(system, integrator)`
+and `system.create_context(integrator)` retain the original System and Integrator;
+`get_system()` and `get_integrator()` return those objects. Both `integrator.step()`
+and `context.step()` advance the same state. A live integrator cannot bind to a
+second Context. The integrator uses a weak link to the Context, so keeping the
+integrator does not create a reference cycle. Dropping the Context releases the
+binding; stepping an unbound integrator raises an error, and rebinding after
+release is a safe lifetime extension.
+Integrator getters/setters provide both snake_case and OpenMM camelCase names;
+the existing scalar properties remain available. Other classes still need API
+naming/signature coverage. Inputs retain the core's finite-value checks: timestep
+and Brownian friction must be positive, and constraint tolerance must be between
+zero and one. The source accepts some boundary values outside this supported
+domain; error and boundary compatibility remain incomplete.
+Reference fixtures cover 72 states with changing settings, all three integrators,
+constraints, fixed particles and kinetic energy. Temperature changes are checked
+independently for LFMiddle and Brownian using 36,000 normalized velocity components
+at each of three temperatures. Both implementations must satisfy six-standard-error
+bounds for the first, second and fourth Gaussian moments. Random paths are not
+compared across implementations. Python probes check double binding, retained
+objects, collection, rebinding, invalid settings and both stepping interfaces.
 Custom nonbonded fixtures cover all three methods, switching, overlapping and
 empty interaction groups, computed values, table updates, global changes, box
 changes and long-range corrections. Pair forces and energies use strict double
@@ -284,8 +307,8 @@ At 13,824 particles, the three-repetition measurements were:
 
 RSS is the maximum across the three processes. These results use the scripted
 coordinate workload and the Reference platform; they do not establish GPU or
-optimized OpenMM CPU performance. The current code passed all 19 reference
-fixtures with 510,911 scalar comparisons, 120 Rust tests and a build with the
+optimized OpenMM CPU performance. The current code passed all 20 reference
+fixtures with 513,719 scalar comparisons, 120 Rust tests and a build with the
 default backend feature disabled.
 
 `scripts/benchmark-cv.sh` measures a weighted mean of disjoint RG selections,
@@ -349,6 +372,33 @@ Optimize measured bottlenecks while retaining reference comparisons. Priorities:
 GPU jobs must run through Slurm. Use at most two nodes concurrently across all
 jobs for this project. Generated builds, logs, trajectories and benchmark results
 belong under ignored directories.
+
+## Python integration overhead
+
+Python Context/Integrator binding was measured against the preceding copied-integrator
+implementation with release builds, identical free particles, zero temperature,
+0.001 ps steps, ten warm-up steps and three repetitions. This measures binding
+overhead; it is not a comparison with OpenMM Reference or its optimized platforms.
+The script `scripts/benchmark-python-integrator.py` accepts an extension, integrator,
+particle count and step count and checks the final kinetic energy.
+
+| Integrator | Particles | Previous steps/s | Shared steps/s | Previous/shared peak RSS (KiB) |
+| --- | ---: | ---: | ---: | ---: |
+| Verlet | 8 | 1,714,130 | 1,563,074 | 23,832 / 23,980 |
+| Verlet | 4,096 | 35,402 | 35,644 | 24,004 / 23,964 |
+| Verlet | 65,536 | 2,361 | 2,363 | 43,812 / 43,784 |
+| LFMiddle | 8 | 137,997 | 133,002 | 23,960 / 23,904 |
+| LFMiddle | 4,096 | 1,630 | 1,571 | 23,900 / 23,964 |
+| LFMiddle | 65,536 | 93.0 | 90.3 | 46,800 / 46,988 |
+| Brownian | 8 | 167,136 | 163,495 | 23,588 / 23,876 |
+| Brownian | 4,096 | 1,753 | 1,716 | 23,624 / 24,060 |
+| Brownian | 65,536 | 101.0 | 97.9 | 46,944 / 47,228 |
+
+Shared settings add synchronization around integrator access. The eight-particle
+Verlet case is about 9% slower; larger Verlet cases are similar. LFMiddle and
+Brownian are about 2-4% slower in this measurement, and still use tensor operations
+and backend-generated random arrays. CPU stochastic integration and small-system
+overhead remain performance work. Peak RSS here includes the Python process.
 
 ## Documentation discrepancies found during implementation
 
