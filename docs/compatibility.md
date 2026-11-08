@@ -52,7 +52,7 @@ revision in generated validation results.
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
-| State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; isotropic and anisotropic Monte Carlo pressure control are implemented; membrane and flexible barostats remain |
+| State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; isotropic, anisotropic and membrane Monte Carlo pressure control are implemented; the flexible barostat remains |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; integrator settings are shared with the bound Context; broader names/signatures, units and platform selection remain incomplete |
 | Precision | Partial | CPU core supports f32 and f64; Python uses f64. GPU precision modes remain unverified |
@@ -126,6 +126,14 @@ Its pressure query returns three components. Coordinates and box vectors are
 perturbed along the same Cartesian axis, including off-diagonal box entries; see
 the triclinic-pressure compatibility exception below.
 
+MonteCarloMembraneBarostat adds surface-tension work `-gamma*deltaArea` in the
+XY plane, with gamma in bar nm. Positive tension favors larger area. XY can scale
+isotropically or one axis at a time, and Z can vary freely, stay fixed or compensate
+the XY scale to preserve volume. In constant-volume mode the pressure work and
+volume Jacobian are zero. XY and Z mode changes take effect in existing Contexts,
+like frequency changes. The pressure query reports three Cartesian components,
+independently of these shape permissions, and uses the same triclinic correction.
+
 State updates run in System order, independently of force-group masks. Barostat
 energies use the integrator's selected force groups, including separate reciprocal
 PME groups. Its schedule uses an internal counter rather than the Context step
@@ -170,6 +178,23 @@ sampling uses the runtime parameters. Rust tests also check directional pressure
 work, rejected-coordinate preservation, seeded Context independence, f32 scaling,
 invalid-volume rejection and unchanged snapshots. Warmed isotropic and anisotropic
 moves allocate no additional dense position arrays without retained snapshots.
+
+The membrane fixture adds 648 pressure states, 360 schedules with changes to XY/Z
+modes and frequency, and twelve statistical runs across all mode pairs and both
+coordinate-scaling modes. Eight runs with variable volume use a box potential
+that cancels the imposed pressure/surface work and confines the remaining box
+coordinates. This gives independent gamma distributions for area and Z in
+XY-isotropic mode, or for each permitted box length in XY-anisotropic mode, with
+shape `Nscaled + 1`. First and second moments must each lie within six block
+standard errors of their analytic values. The four constant-volume runs use
+harmonic area or length potentials and compare Rust and Reference moments within
+six combined standard errors; these are comparisons of the implemented algorithms,
+not an independent thermodynamic validation of constant-volume shape sampling.
+All runs discard 10,000 steps and use forty blocks of 5,000 steps, with samples
+every twenty steps. The pressure difference stays below 2.02e-11 bar. Rust tests
+also check the sign of surface-tension work, pressure-independent constant-volume
+paths, selected energy groups, f32 geometry and dense-storage reuse.
+
 
 
 Python System objects retain the original force objects and expose `get_force`,
@@ -495,6 +520,23 @@ The 65,536-atom cases run about 4.3 and 6.1 times faster and use less peak proce
 memory than Reference. This remains a coordinate-update benchmark with excluded
 potential forces, so the molecular force-field performance target remains open.
 
+Passing `membrane` runs XY-isotropic moves with Z fixed at 3 nm, pressure 20 bar
+and surface tension 7 bar nm. Its initial volume and check use effective pressure
+`P - gamma/Lz`; the remaining benchmark protocol is unchanged.
+
+| Scaling | Atoms | Rust median steps/s | Reference median steps/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Rigid | 512 | 154,046 | 42,195 | 4,036 | 7,272 |
+| Rigid | 4,096 | 18,701 | 4,988 | 5,216 | 8,620 |
+| Rigid | 65,536 | 1,337 | 310 | 23,860 | 29,856 |
+| Atomic | 512 | 196,684 | 41,607 | 4,132 | 7,492 |
+| Atomic | 4,096 | 27,689 | 5,058 | 5,028 | 8,768 |
+| Atomic | 65,536 | 1,897 | 312 | 20,968 | 31,268 |
+
+These cases retain the reused proposal storage. The benchmark measures coordinate
+and Context overhead with potential forces excluded; it does not establish lipid
+bilayer equilibration or molecular force-field throughput.
+
 ## Validation and optimization rules
 
 Numerical comparisons use the supplied reference implementation, matching system,
@@ -571,9 +613,12 @@ Small-system overhead remains optimization work.
 
 ## Documentation discrepancies found during implementation
 
-- The isotropic and anisotropic barostat constructor comments call the rigid scaling center a
+- The isotropic, anisotropic and membrane barostat constructor comments call the rigid scaling center a
   center of mass. The Reference kernel instead uses the unweighted centroid,
-  consistent with that class's getter/setter documentation. Rust follows the code.
+  consistent with their getter/setter documentation. Rust follows the code.
+- The membrane barostat surface-tension setter describes its argument as bar,
+  although its getter, constructor and area-work calculation use bar nm. Rust
+  uses bar nm for both getter and setter.
 
 - The original Verlet header called its update velocity Verlet, but the stored
   velocity and update equations implement leapfrog. The header now names leapfrog.
@@ -689,8 +734,8 @@ volume was about 12.27 nm^3 and the proposal half-width about 13.69 nm^3. The re
 statistical fixtures use 128 atoms. A separate Rust regression tests rejection of
 nonpositive proposals after a large external reduction of box volume.
 
-The supplied anisotropic pressure API scales a whole box vector when probing an
-axis but scales coordinates by Cartesian component. Those operations coincide
+The supplied anisotropic and membrane pressure APIs scale a whole box vector when probing an
+axis but scale coordinates by Cartesian component. Those operations coincide
 for orthorhombic cells and differ for triclinic cells. Rust instead scales each
 Cartesian column of the box, matching the actual Monte Carlo proposals. For the
 energy `E = bx`, box vectors `(3,0,0)`, `(0.4,3.3,0)`, `(-0.2,0.3,3.5)` and zero

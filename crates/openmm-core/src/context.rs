@@ -4,6 +4,7 @@ use crate::forces::barostat::{
     scaled_box, scaled_box_axes, volume, MonteCarloBarostat, BAR_NM3_TO_KJ_PER_MOL,
 };
 use crate::forces::custom_cv::{update_force_parameters, CustomCVForce};
+use crate::forces::membrane_barostat::MonteCarloMembraneBarostat;
 // Context owns the mutable simulation state and drives the MD loop.
 // Generic over burn Backend: NdArray (CPU), Wgpu (GPU), Cuda.
 use burn::prelude::*;
@@ -849,6 +850,21 @@ impl<B: Backend> Context<B> {
             })
             .ok_or_else(|| {
                 "force index does not identify a MonteCarloAnisotropicBarostat".to_owned()
+            })?;
+        self.axis_pressures(barostat.scale_molecules_as_rigid())
+    }
+
+    pub fn compute_current_membrane_pressure(
+        &self,
+        force_index: usize,
+    ) -> Result<[f64; 3], String> {
+        let barostat = self
+            .system
+            .forces()
+            .get(force_index)
+            .and_then(|force| force.as_any().downcast_ref::<MonteCarloMembraneBarostat>())
+            .ok_or_else(|| {
+                "force index does not identify a MonteCarloMembraneBarostat".to_owned()
             })?;
         self.axis_pressures(barostat.scale_molecules_as_rigid())
     }

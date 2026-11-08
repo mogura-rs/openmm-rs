@@ -58,8 +58,12 @@ def main():
     if all(record.get("barostat") for rows in groups.values() for record in rows):
         kinds = {record.get("barostat_kind", "isotropic") for rows in groups.values() for record in rows}
         assert len(kinds) == 1, kinds
-        mode = "isotropic" if kinds == {"isotropic"} else "single-axis anisotropic"
-        note = f"Matched f64 {mode} volume moves every Verlet step at 20 bar and 300 K, with 100 warmup steps. Zero-strength bonds define diatomic molecules; integration force groups exclude potential forces. Initial volume is the ideal-gas mean; the final volume must remain within six equilibrium standard deviations. Random paths differ. This measures coordinate-scaling and Context overhead, not force-field throughput or equilibrium convergence. Optimized CPU/GPU platforms are not measured."
+        kind = next(iter(kinds))
+        mode = {"isotropic": "isotropic", "anisotropic": "single-axis anisotropic", "membrane": "XY-isotropic membrane"}[kind]
+        settings = "20 bar and 300 K"
+        if kind == "membrane":
+            settings = "20 bar, 7 bar nm surface tension, 300 K and fixed Z=3 nm"
+        note = f"Matched f64 {mode} volume moves every Verlet step at {settings}, with 100 warmup steps. Zero-strength bonds define diatomic molecules; integration force groups exclude potential forces. Initial volume is the ideal-gas mean; the final volume must remain within six equilibrium standard deviations. Random paths differ. This measures coordinate-scaling and Context overhead, not force-field throughput or equilibrium convergence. Optimized CPU/GPU platforms are not measured."
     result = {"note": note, "cases": groups, "summary": summaries}
     (directory / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))

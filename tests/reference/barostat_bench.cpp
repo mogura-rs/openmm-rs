@@ -1,6 +1,7 @@
 #include <openmm/Context.h>
 #include <openmm/HarmonicBondForce.h>
 #include <openmm/MonteCarloBarostat.h>
+#include <openmm/MonteCarloMembraneBarostat.h>
 #include <openmm/MonteCarloAnisotropicBarostat.h>
 #include <openmm/Platform.h>
 #include <openmm/State.h>
@@ -16,20 +17,25 @@ int main(int argc, char** argv) {
     const int iterations=argc>2?std::stoi(argv[2]):1000;
     const bool rigid=argc<4 || std::string(argv[3])=="rigid";
     const std::string kind=argc>4?argv[4]:"isotropic";
-    if (kind!="isotropic" && kind!="anisotropic") throw std::runtime_error("unknown barostat kind");
+    if (kind!="isotropic" && kind!="anisotropic" && kind!="membrane") throw std::runtime_error("unknown barostat kind");
     const int scaled=rigid?n/2:n;
     const double kt=1.380649e-23*6.02214076e23/1000*300;
-    const double thermalVolume=kt/(20*0.0602214076);
+    const double pressure=kind=="membrane"?20-7.0/3.0:20;
+    const double thermalVolume=kt/(pressure*0.0602214076);
     const double expectedVolume=(scaled+1)*thermalVolume;
     const double volumeStddev=std::sqrt(scaled+1)*thermalVolume;
-    const double length=std::cbrt(expectedVolume);
+    const double height=kind=="membrane"?3:std::cbrt(expectedVolume);
+    const double length=kind=="membrane"?std::sqrt(expectedVolume/height):height;
     System system;
     for (int i=0;i<n;++i) system.addParticle(1);
-    system.setDefaultPeriodicBoxVectors(Vec3(length,0,0),Vec3(0,length,0),Vec3(0,0,length));
+    system.setDefaultPeriodicBoxVectors(Vec3(length,0,0),Vec3(0,length,0),Vec3(0,0,height));
     auto* bond=new HarmonicBondForce();
     for (int i=0;i<n;i+=2) bond->addBond(i,i+1,0.02,0);
     bond->setUsesPeriodicBoundaryConditions(true);system.addForce(bond);
-    if (kind=="anisotropic") {
+    if (kind=="membrane") {
+        auto* barostat=new MonteCarloMembraneBarostat(20,7,300,MonteCarloMembraneBarostat::XYIsotropic,MonteCarloMembraneBarostat::ZFixed,1,rigid);
+        barostat->setRandomNumberSeed(3721);system.addForce(barostat);
+    } else if (kind=="anisotropic") {
         auto* barostat=new MonteCarloAnisotropicBarostat(Vec3(20,20,20),300,true,false,false,1,rigid);
         barostat->setRandomNumberSeed(3721);system.addForce(barostat);
     } else {

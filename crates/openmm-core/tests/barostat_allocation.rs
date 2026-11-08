@@ -1,7 +1,8 @@
 use burn::{backend::NdArray, tensor::TensorData};
 use openmm_core::{
-    Context, Force, HarmonicBondForce, MonteCarloAnisotropicBarostat, MonteCarloBarostat,
-    StateFlags, System, VerletIntegrator,
+    Context, Force, HarmonicBondForce, MembraneXYMode, MembraneZMode,
+    MonteCarloAnisotropicBarostat, MonteCarloBarostat, MonteCarloMembraneBarostat, StateFlags,
+    System, VerletIntegrator,
 };
 use std::alloc::{GlobalAlloc, Layout, System as SystemAllocator};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,7 +31,14 @@ static ALLOCATOR: TrackingAllocator = TrackingAllocator;
 
 #[test]
 fn volume_moves_reuse_dense_storage_and_preserve_snapshots() {
-    for (rigid, anisotropic) in [(false, false), (true, false), (false, true), (true, true)] {
+    for (rigid, kind) in [
+        (false, 0),
+        (true, 0),
+        (false, 1),
+        (true, 1),
+        (false, 2),
+        (true, 2),
+    ] {
         let mut system = System::<NdArray<f64>>::new();
         for _ in 0..PARTICLES {
             system.add_particle(1.0);
@@ -44,7 +52,19 @@ fn volume_moves_reuse_dense_storage_and_preserve_snapshots() {
         let mut barostat = MonteCarloBarostat::new(1.0, 300.0, 1);
         barostat.set_scale_molecules_as_rigid(rigid);
         barostat.set_random_number_seed(47);
-        if anisotropic {
+        if kind == 2 {
+            let mut barostat = MonteCarloMembraneBarostat::new(
+                1.0,
+                0.0,
+                300.0,
+                MembraneXYMode::Isotropic,
+                MembraneZMode::Fixed,
+                1,
+            );
+            barostat.set_scale_molecules_as_rigid(rigid);
+            barostat.set_random_number_seed(47);
+            system.add_force(Box::new(barostat));
+        } else if kind == 1 {
             let mut barostat = MonteCarloAnisotropicBarostat::new([1.0; 3], 300.0, [true; 3], 1);
             barostat.set_scale_molecules_as_rigid(rigid);
             barostat.set_random_number_seed(47);

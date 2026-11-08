@@ -1,7 +1,8 @@
 use burn::{backend::NdArray, tensor::TensorData};
 use openmm_core::{
-    tensor::from_floats, Context, HarmonicBondForce, MonteCarloAnisotropicBarostat,
-    MonteCarloBarostat, StateFlags, System, VerletIntegrator,
+    tensor::from_floats, Context, HarmonicBondForce, MembraneXYMode, MembraneZMode,
+    MonteCarloAnisotropicBarostat, MonteCarloBarostat, MonteCarloMembraneBarostat, StateFlags,
+    System, VerletIntegrator,
 };
 use std::{hint::black_box, time::Instant};
 
@@ -11,14 +12,28 @@ fn main() {
     let iterations: usize = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(1000);
     let rigid = args.get(3).is_none_or(|s| s == "rigid");
     let kind = args.get(4).map(String::as_str).unwrap_or("isotropic");
-    assert!(matches!(kind, "isotropic" | "anisotropic"));
+    assert!(matches!(kind, "isotropic" | "anisotropic" | "membrane"));
     assert!(n >= 2 && n.is_multiple_of(2) && iterations > 0);
     let scaled = if rigid { n / 2 } else { n };
     let kt = 1.380649e-23 * 6.02214076e23 / 1000.0 * 300.0;
-    let thermal_volume = kt / (20.0 * 0.0602214076);
+    let pressure = if kind == "membrane" {
+        20.0 - 7.0 / 3.0
+    } else {
+        20.0
+    };
+    let thermal_volume = kt / (pressure * 0.0602214076);
     let expected_volume = (scaled + 1) as f64 * thermal_volume;
     let volume_stddev = ((scaled + 1) as f64).sqrt() * thermal_volume;
-    let length = expected_volume.cbrt();
+    let height = if kind == "membrane" {
+        3.0
+    } else {
+        expected_volume.cbrt()
+    };
+    let length = if kind == "membrane" {
+        (expected_volume / height).sqrt()
+    } else {
+        height
+    };
     let mut system = System::<NdArray<f64>>::new();
     for _ in 0..n {
         system.add_particle(1.0);
@@ -26,7 +41,7 @@ fn main() {
     system.set_default_periodic_box_vectors([
         [length, 0.0, 0.0],
         [0.0, length, 0.0],
-        [0.0, 0.0, length],
+        [0.0, 0.0, height],
     ]);
     let mut bond = HarmonicBondForce::new();
     for i in (0..n).step_by(2) {
@@ -34,7 +49,19 @@ fn main() {
     }
     bond.set_uses_periodic_boundary_conditions(true);
     system.add_force(Box::new(bond));
-    if kind == "anisotropic" {
+    if kind == "membrane" {
+        let mut barostat = MonteCarloMembraneBarostat::new(
+            20.0,
+            7.0,
+            300.0,
+            MembraneXYMode::Isotropic,
+            MembraneZMode::Fixed,
+            1,
+        );
+        barostat.set_scale_molecules_as_rigid(rigid);
+        barostat.set_random_number_seed(3721);
+        system.add_force(Box::new(barostat));
+    } else if kind == "anisotropic" {
         let mut barostat =
             MonteCarloAnisotropicBarostat::new([20.0; 3], 300.0, [true, false, false], 1);
         barostat.set_scale_molecules_as_rigid(rigid);

@@ -59,3 +59,4 @@ pub use forces::anisotropic_barostat::MonteCarloAnisotropicBarostat;
 pub use forces::barostat::MonteCarloBarostat;
 pub use forces::cm_motion::CMMotionRemover;
 pub use forces::custom_cv::CustomCVForce;
+pub use forces::membrane_barostat::{MembraneXYMode, MembraneZMode, MonteCarloMembraneBarostat};
