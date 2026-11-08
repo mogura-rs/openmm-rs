@@ -3,6 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 reference_source="${OPENMM_SOURCE:-../openmm}"
+kind="${1:-isotropic}"
+case "$kind" in isotropic|anisotropic) ;; *) echo "Unknown barostat kind: $kind" >&2; exit 2 ;; esac
 reference_build=target/reference-openmm
 export CARGO_TARGET_DIR=target/benchmark-rust
 jobs="${SLURM_CPUS_PER_TASK:-4}"
@@ -17,6 +19,7 @@ time_flags=(-v)
 if [[ "$(uname -s)" == Darwin ]]; then time_flags=(-l); fi
 for mode in rigid atomic; do
     directory="benchmark-results/barostat/$mode"
+    if [[ "$kind" == anisotropic ]]; then directory="benchmark-results/anisotropic-barostat/$mode"; fi
     mkdir -p "$directory"
     for particles in 512 4096 65536; do
         iterations=2000
@@ -32,7 +35,7 @@ for mode in rigid atomic; do
                     benchmark_command=(target/reference-barostat-bench)
                 fi
                 "$time_command" "${time_flags[@]}" \
-                    "${benchmark_command[@]}" "$particles" "$iterations" "$mode" \
+                    "${benchmark_command[@]}" "$particles" "$iterations" "$mode" "$kind" \
                     > "$directory/${implementation}-${particles}-${repetition}.json" \
                     2> "$directory/${implementation}-${particles}-${repetition}.memory.txt"
             done

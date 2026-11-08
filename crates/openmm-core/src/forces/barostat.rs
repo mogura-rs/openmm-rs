@@ -29,6 +29,16 @@ pub(crate) fn scaled_box(vectors: &BoxVectors, scale: f64) -> BoxVectors {
     vectors.map(|vector| vector.map(|value| value * scale))
 }
 
+pub(crate) fn scaled_box_axes(vectors: &BoxVectors, scale: [f64; 3]) -> BoxVectors {
+    vectors.map(|vector| {
+        [
+            vector[0] * scale[0],
+            vector[1] * scale[1],
+            vector[2] * scale[2],
+        ]
+    })
+}
+
 #[derive(Clone)]
 pub struct MonteCarloBarostat {
     metadata: super::ForceMetadata,

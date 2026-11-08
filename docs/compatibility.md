@@ -52,7 +52,7 @@ revision in generated validation results.
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
-| State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; isotropic Monte Carlo pressure control is implemented; anisotropic, membrane and flexible barostats remain |
+| State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; isotropic and anisotropic Monte Carlo pressure control are implemented; membrane and flexible barostats remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; integrator settings are shared with the bound Context; broader names/signatures, units and platform selection remain incomplete |
 | Precision | Partial | CPU core supports f32 and f64; Python uses f64. GPU precision modes remain unverified |
@@ -117,6 +117,15 @@ other backends retain tensor construction. Instantaneous-pressure queries use
 temporary coordinate storage and do not change the Context cache.
 The proposal width adapts to the observed acceptance fraction, matching Reference.
 
+MonteCarloAnisotropicBarostat selects one enabled Cartesian axis per attempt and
+scales that component of every box vector and coordinate. Each axis has its own
+pressure parameter, proposal width and acceptance counters. Axis permissions are
+fixed at construction; all three disabled axes leave the box unchanged. Molecular
+and atomic scaling use the same coordinate-buffer reuse as the isotropic barostat.
+Its pressure query returns three components. Coordinates and box vectors are
+perturbed along the same Cartesian axis, including off-diagonal box entries; see
+the triclinic-pressure compatibility exception below.
+
 State updates run in System order, independently of force-group masks. Barostat
 energies use the integrator's selected force groups, including separate reciprocal
 PME groups. Its schedule uses an internal counter rather than the Context step
@@ -135,7 +144,7 @@ matching Reference. The query preserves coordinates, velocities, box, clock and
 step count. Python pressure queries identify the original force retained when the
 Context was created; later System edits do not change that lookup.
 
-The pressure fixtures cover 324 states with unequal and zero masses, constraints,
+The isotropic pressure fixtures cover 324 states with unequal and zero masses, constraints,
 virtual sites, triclinic boxes, changed globals, volume energies, PME direct and
 reciprocal groups, and short trajectories. Another 60 states compare disabled and
 changed frequencies independently of Context step counts. Statistical checks use
@@ -147,6 +156,21 @@ volume. Each run discards 10,000 steps, then uses forty blocks of 5,000 steps,
 recording a volume every twenty steps. Each mean must lie within six block standard
 errors of its analytic expectation. These checks test configurational sampling;
 they do not establish long-run molecular NPT stability or thermostat equilibration.
+
+The anisotropic fixture adds 648 pressure states across orthorhombic and triclinic
+cells with the same force-group, mass, constraint and virtual-site coverage.
+Orthorhombic pressures are checked against the source pressure API and an independent
+finite difference. Triclinic pressures are checked against Cartesian finite
+differences of source energies. The largest pressure difference was 2.02e-11 bar.
+Another 480 states cover all eight axis permissions and live frequency changes.
+Six statistical runs independently check each moving axis, in rigid and atomic
+modes, using the same volume distribution and block protocol. These runs change
+Context pressures and temperature and then alter force defaults, verifying that
+sampling uses the runtime parameters. Rust tests also check directional pressure
+work, rejected-coordinate preservation, seeded Context independence, f32 scaling,
+invalid-volume rejection and unchanged snapshots. Warmed isotropic and anisotropic
+moves allocate no additional dense position arrays without retained snapshots.
+
 
 Python System objects retain the original force objects and expose `get_force`,
 `get_forces` and `remove_force`. Context creation snapshots the current definitions,
@@ -454,6 +478,23 @@ require separate measurements. Barostat trial energies still evaluate force
 kernels that return both energy and forces; dedicated energy-only kernels remain
 performance work.
 
+Passing `anisotropic` to `scripts/benchmark-barostat.sh` runs the same workload
+with only X allowed to change. It uses the same sizes, temperatures, pressures,
+iteration counts and repetitions as the isotropic measurement.
+
+| Scaling | Atoms | Rust median steps/s | Reference median steps/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Rigid | 512 | 149,847 | 43,150 | 4,152 | 7,232 |
+| Rigid | 4,096 | 20,727 | 5,000 | 5,160 | 8,636 |
+| Rigid | 65,536 | 1,340 | 312 | 23,828 | 29,848 |
+| Atomic | 512 | 162,513 | 41,663 | 4,200 | 7,280 |
+| Atomic | 4,096 | 27,095 | 5,047 | 4,928 | 8,412 |
+| Atomic | 65,536 | 1,884 | 308 | 20,940 | 31,244 |
+
+The 65,536-atom cases run about 4.3 and 6.1 times faster and use less peak process
+memory than Reference. This remains a coordinate-update benchmark with excluded
+potential forces, so the molecular force-field performance target remains open.
+
 ## Validation and optimization rules
 
 Numerical comparisons use the supplied reference implementation, matching system,
@@ -530,7 +571,7 @@ Small-system overhead remains optimization work.
 
 ## Documentation discrepancies found during implementation
 
-- The MonteCarloBarostat constructor comment calls the rigid scaling center a
+- The isotropic and anisotropic barostat constructor comments call the rigid scaling center a
   center of mass. The Reference kernel instead uses the unweighted centroid,
   consistent with that class's getter/setter documentation. Rust follows the code.
 
@@ -641,9 +682,19 @@ coordinate kernel keeps its original mode. Rust retains a consistent captured mo
 Create a new Context to apply a changed mode.
 
 Nonpositive proposed volumes are rejected before computing a box scale. The
-supplied Reference implementation instead evaluates a fractional power of a
+supplied isotropic Reference implementation instead evaluates a fractional power of a
 negative volume ratio, producing nonfinite box vectors and an exception. A seeded
 32-atom, 16-molecule ideal-gas probe reproduced this after 35,111 completed steps: the current
 volume was about 12.27 nm^3 and the proposal half-width about 13.69 nm^3. The regular
 statistical fixtures use 128 atoms. A separate Rust regression tests rejection of
 nonpositive proposals after a large external reduction of box volume.
+
+The supplied anisotropic pressure API scales a whole box vector when probing an
+axis but scales coordinates by Cartesian component. Those operations coincide
+for orthorhombic cells and differ for triclinic cells. Rust instead scales each
+Cartesian column of the box, matching the actual Monte Carlo proposals. For the
+energy `E = bx`, box vectors `(3,0,0)`, `(0.4,3.3,0)`, `(-0.2,0.3,3.5)` and zero
+velocities, the source reports `(0,-0.1916928,0)` bar. The Cartesian derivative,
+returned by Rust, is `(-0.1916928,0,0)` bar. The fixture retains source API values
+and separately evaluates source-energy finite differences, so this exception is
+explicit rather than absorbed into a numerical tolerance.

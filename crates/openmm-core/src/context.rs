@@ -1,5 +1,8 @@
 use crate::forces::alignment::{OrientationRestraintForce, RMSDForce};
-use crate::forces::barostat::{scaled_box, volume, MonteCarloBarostat, BAR_NM3_TO_KJ_PER_MOL};
+use crate::forces::anisotropic_barostat::MonteCarloAnisotropicBarostat;
+use crate::forces::barostat::{
+    scaled_box, scaled_box_axes, volume, MonteCarloBarostat, BAR_NM3_TO_KJ_PER_MOL,
+};
 use crate::forces::custom_cv::{update_force_parameters, CustomCVForce};
 // Context owns the mutable simulation state and drives the MD loop.
 // Generic over burn Backend: NdArray (CPU), Wgpu (GPU), Cuda.
@@ -822,41 +825,90 @@ impl<B: Backend> Context<B> {
             )
         };
         let difference = energy(1.001) - energy(0.999);
-        let kinetic = crate::tensor::with_f64_data(&self.velocities, |velocities| {
-            if rigid {
-                self.molecules()
-                    .iter()
-                    .map(|molecule| {
-                        let mut momentum = [0.0; 3];
-                        let mut mass = 0.0;
-                        for &atom in molecule {
-                            mass += self.host_masses[atom];
-                            for axis in 0..3 {
-                                momentum[axis] +=
-                                    self.host_masses[atom] * velocities[3 * atom + axis];
-                            }
-                        }
-                        if mass == 0.0 {
-                            0.0
-                        } else {
-                            0.5 * momentum.iter().map(|p| p * p).sum::<f64>() / mass
-                        }
-                    })
-                    .sum::<f64>()
-            } else {
-                self.host_masses
-                    .iter()
-                    .zip(velocities.chunks_exact(3))
-                    .map(|(mass, v)| 0.5 * mass * v.iter().map(|x| x * x).sum::<f64>())
-                    .sum()
-            }
-        });
+        let kinetic: f64 = self.pressure_kinetic_energy(rigid).iter().sum();
         let current_volume = volume(vectors);
         let delta_volume = current_volume * (1.001_f64.powi(3) - 0.999_f64.powi(3));
         Ok(
             ((2.0 / 3.0) * kinetic / current_volume - difference / delta_volume)
                 / BAR_NM3_TO_KJ_PER_MOL,
         )
+    }
+
+    pub fn compute_current_anisotropic_pressure(
+        &self,
+        force_index: usize,
+    ) -> Result<[f64; 3], String> {
+        let barostat = self
+            .system
+            .forces()
+            .get(force_index)
+            .and_then(|force| {
+                force
+                    .as_any()
+                    .downcast_ref::<MonteCarloAnisotropicBarostat>()
+            })
+            .ok_or_else(|| {
+                "force index does not identify a MonteCarloAnisotropicBarostat".to_owned()
+            })?;
+        self.axis_pressures(barostat.scale_molecules_as_rigid())
+    }
+
+    fn axis_pressures(&self, rigid: bool) -> Result<[f64; 3], String> {
+        let vectors = self
+            .periodic_box_vectors
+            .as_ref()
+            .ok_or_else(|| "a barostat requires a periodic box".to_owned())?;
+        let kinetic = self.pressure_kinetic_energy(rigid);
+        let current_volume = volume(vectors);
+        Ok(std::array::from_fn(|axis| {
+            let energy = |factor: f64| {
+                let mut scale = [1.0; 3];
+                scale[axis] = factor;
+                let transform = [
+                    [scale[0], 0.0, 0.0],
+                    [0.0, scale[1], 0.0],
+                    [0.0, 0.0, scale[2]],
+                ];
+                self.energy_at(
+                    &self.scaled_positions(transform, rigid),
+                    &scaled_box_axes(vectors, scale),
+                    self.integrator.integration_force_groups(),
+                )
+            };
+            (2.0 * kinetic[axis] / current_volume
+                - (energy(1.001) - energy(0.999)) / (0.002 * current_volume))
+                / BAR_NM3_TO_KJ_PER_MOL
+        }))
+    }
+
+    fn pressure_kinetic_energy(&self, rigid: bool) -> [f64; 3] {
+        crate::tensor::with_f64_data(&self.velocities, |velocities| {
+            let mut kinetic = [0.0; 3];
+            if rigid {
+                for molecule in self.molecules() {
+                    let mut momentum = [0.0; 3];
+                    let mut mass = 0.0;
+                    for &atom in molecule {
+                        mass += self.host_masses[atom];
+                        for axis in 0..3 {
+                            momentum[axis] += self.host_masses[atom] * velocities[3 * atom + axis];
+                        }
+                    }
+                    if mass > 0.0 {
+                        for axis in 0..3 {
+                            kinetic[axis] += 0.5 * momentum[axis] * momentum[axis] / mass;
+                        }
+                    }
+                }
+            } else {
+                for (mass, velocity) in self.host_masses.iter().zip(velocities.chunks_exact(3)) {
+                    for axis in 0..3 {
+                        kinetic[axis] += 0.5 * mass * velocity[axis] * velocity[axis];
+                    }
+                }
+            }
+            kinetic
+        })
     }
 
     pub fn get_state_options(

@@ -56,7 +56,10 @@ def main():
     if all("integrator" in record for rows in groups.values() for record in rows):
         note = "Matched single-process f64 free-particle integration at dt=0.001 ps with 10 warmup steps. Stochastic friction is 0.7/ps. Kinetic energy is checked against the finite-time Gaussian mean and a six-standard-deviation bound. Random paths differ. Optimized CPU/GPU platforms are not measured."
     if all(record.get("barostat") for rows in groups.values() for record in rows):
-        note = "Matched f64 isotropic volume moves every Verlet step at 20 bar and 300 K, with 100 warmup steps. Zero-strength bonds define diatomic molecules; integration force groups exclude potential forces. Initial volume is the ideal-gas mean; the final volume must remain within six equilibrium standard deviations. Random paths differ. This measures coordinate-scaling and Context overhead, not force-field throughput or equilibrium convergence. Optimized CPU/GPU platforms are not measured."
+        kinds = {record.get("barostat_kind", "isotropic") for rows in groups.values() for record in rows}
+        assert len(kinds) == 1, kinds
+        mode = "isotropic" if kinds == {"isotropic"} else "single-axis anisotropic"
+        note = f"Matched f64 {mode} volume moves every Verlet step at 20 bar and 300 K, with 100 warmup steps. Zero-strength bonds define diatomic molecules; integration force groups exclude potential forces. Initial volume is the ideal-gas mean; the final volume must remain within six equilibrium standard deviations. Random paths differ. This measures coordinate-scaling and Context overhead, not force-field throughput or equilibrium convergence. Optimized CPU/GPU platforms are not measured."
     result = {"note": note, "cases": groups, "summary": summaries}
     (directory / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))

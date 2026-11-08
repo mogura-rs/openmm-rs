@@ -7,14 +7,14 @@ pub(crate) struct PyMonteCarloBarostat {
     pub(crate) inner: MonteCarloBarostat,
 }
 
-fn validate_pressure(value: f64) -> PyResult<()> {
+pub(super) fn validate_pressure(value: f64) -> PyResult<()> {
     if value.is_finite() {
         Ok(())
     } else {
         Err(err("pressure must be finite"))
     }
 }
-fn validate_temperature(value: f64) -> PyResult<()> {
+pub(super) fn validate_temperature(value: f64) -> PyResult<()> {
     if value.is_finite() && value >= 0.0 {
         Ok(())
     } else {

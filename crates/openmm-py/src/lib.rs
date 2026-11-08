@@ -1,3 +1,5 @@
+mod anisotropic_barostat;
+use anisotropic_barostat::PyMonteCarloAnisotropicBarostat;
 mod andersen;
 mod barostat;
 mod cm_motion;
@@ -1806,6 +1808,9 @@ impl PySystem {
 }
 
 fn extract_force_snapshot(force: &Bound<'_, PyAny>) -> PyResult<Box<dyn openmm_core::Force<B>>> {
+    if let Ok(force) = force.extract::<PyRef<'_, PyMonteCarloAnisotropicBarostat>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
     if let Ok(force) = force.extract::<PyRef<'_, PyMonteCarloBarostat>>() {
         return Ok(Box::new(force.inner.clone()));
     }
@@ -2243,6 +2248,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCMMotionRemover>()?;
     m.add_class::<PyAndersenThermostat>()?;
     barostat::register(m)?;
+    anisotropic_barostat::register(m)?;
     m.add_class::<PyCustomAngleForce>()?;
     m.add_class::<PyCustomNonbondedForce>()?;
     m.add_class::<PyCMAPTorsionForce>()?;

@@ -1,6 +1,7 @@
 use burn::{backend::NdArray, tensor::TensorData};
 use openmm_core::{
-    Context, Force, HarmonicBondForce, MonteCarloBarostat, StateFlags, System, VerletIntegrator,
+    Context, Force, HarmonicBondForce, MonteCarloAnisotropicBarostat, MonteCarloBarostat,
+    StateFlags, System, VerletIntegrator,
 };
 use std::alloc::{GlobalAlloc, Layout, System as SystemAllocator};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,7 +30,7 @@ static ALLOCATOR: TrackingAllocator = TrackingAllocator;
 
 #[test]
 fn volume_moves_reuse_dense_storage_and_preserve_snapshots() {
-    for rigid in [false, true] {
+    for (rigid, anisotropic) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut system = System::<NdArray<f64>>::new();
         for _ in 0..PARTICLES {
             system.add_particle(1.0);
@@ -43,7 +44,14 @@ fn volume_moves_reuse_dense_storage_and_preserve_snapshots() {
         let mut barostat = MonteCarloBarostat::new(1.0, 300.0, 1);
         barostat.set_scale_molecules_as_rigid(rigid);
         barostat.set_random_number_seed(47);
-        system.add_force(Box::new(barostat));
+        if anisotropic {
+            let mut barostat = MonteCarloAnisotropicBarostat::new([1.0; 3], 300.0, [true; 3], 1);
+            barostat.set_scale_molecules_as_rigid(rigid);
+            barostat.set_random_number_seed(47);
+            system.add_force(Box::new(barostat));
+        } else {
+            system.add_force(Box::new(barostat));
+        }
         let mut integrator = VerletIntegrator::new(0.001);
         integrator.set_integration_force_groups(0);
         let mut context = Context::new(system, Box::new(integrator), Default::default());
