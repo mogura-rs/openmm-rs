@@ -111,6 +111,10 @@ impl<T: Integrator<B>> Integrator<B> for SharedIntegrator<T> {
     fn step_size(&self) -> f64 {
         self.0.lock().unwrap().step_size()
     }
+
+    fn actual_step_size(&self) -> f64 {
+        self.0.lock().unwrap().actual_step_size()
+    }
     fn supports_step_to(&self) -> bool {
         self.0.lock().unwrap().supports_step_to()
     }
@@ -244,6 +248,8 @@ macro_rules! integrator_class {
 
 mod dpd;
 use dpd::PyDPDIntegrator;
+mod qtb;
+use qtb::PyQTBIntegrator;
 mod nose_hoover;
 use nose_hoover::{PyNoseHooverChain, PyNoseHooverIntegrator};
 
@@ -622,6 +628,7 @@ fn prepare_shared(object: &Bound<'_, PyAny>) -> PyResult<(Box<dyn Integrator<B>>
         };
     }
     extract!(PyDPDIntegrator);
+    extract!(PyQTBIntegrator);
     extract!(PyNoseHooverIntegrator);
     extract!(PyCompoundIntegrator);
     extract!(PyVariableVerletIntegrator);
@@ -676,6 +683,7 @@ pub(crate) fn create_context(
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyDPDIntegrator>()?;
+    module.add_class::<PyQTBIntegrator>()?;
     module.add_class::<PyNoseHooverIntegrator>()?;
     module.add_class::<PyNoseHooverChain>()?;
     module.add_class::<PyCompoundIntegrator>()?;
@@ -687,6 +695,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyBrownianIntegrator>()?;
     for class in [
         module.py().get_type::<PyDPDIntegrator>(),
+        module.py().get_type::<PyQTBIntegrator>(),
         module.py().get_type::<PyNoseHooverIntegrator>(),
         module.py().get_type::<PyNoseHooverChain>(),
         module.py().get_type::<PyCompoundIntegrator>(),
@@ -697,6 +706,15 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.py().get_type::<PyBrownianIntegrator>(),
     ] {
         for (snake, camel) in [
+            ("get_segment_length", "getSegmentLength"),
+            ("set_segment_length", "setSegmentLength"),
+            ("get_cutoff_frequency", "getCutoffFrequency"),
+            ("set_cutoff_frequency", "setCutoffFrequency"),
+            ("get_default_adaptation_rate", "getDefaultAdaptationRate"),
+            ("set_default_adaptation_rate", "setDefaultAdaptationRate"),
+            ("get_type_adaptation_rates", "getTypeAdaptationRates"),
+            ("set_type_adaptation_rate", "setTypeAdaptationRate"),
+            ("get_adapted_friction", "getAdaptedFriction"),
             ("get_default_friction", "getDefaultFriction"),
             ("set_default_friction", "setDefaultFriction"),
             ("get_default_cutoff", "getDefaultCutoff"),

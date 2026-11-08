@@ -51,7 +51,7 @@ revision in generated validation results.
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
-| Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator, Nose-Hoover chains and DPD have reference comparisons; other integrators and wider statistical validation remain |
+| Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator, Nose-Hoover chains, DPD and QTB have reference comparisons; CustomIntegrator execution and wider molecular validation remain |
 | State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; all four Monte Carlo barostats have CPU implementations and reference fixtures; broader molecular NPT stability and GPU execution remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; integrator settings are shared with the bound Context; broader names/signatures, units and platform selection remain incomplete |
@@ -1071,6 +1071,148 @@ positive-temperature paths differ. These short timing runs do not test
 equilibrium or molecular force-field throughput. Optimized OpenMM CPU and GPU
 platforms are not included.
 
+## Adaptive quantum thermal bath
+
+`QTBIntegrator` implements the Reference middle splitting with a full force kick,
+velocity constraints, two half drifts around a colored-noise velocity update,
+position constraints and velocity correction. Virtual sites are updated after
+integration. Temperature changes take effect at the next segment boundary;
+constraint tolerance and integration groups remain live. Step size, friction,
+segment length, cutoff, particle types, adaptation rates and the random stream
+are captured when the Context is initialized. Their getters still expose newly
+assigned settings, which take effect on reinitialization.
+
+Explicit particle types are arbitrary integers. Particles of one type must have
+identical masses and share adapted friction coefficients. Each particle without
+an explicit type receives its own type. Fixed particles remain fixed. Both
+Python naming styles and nested CompoundIntegrator binding are supported.
+
+The physical step size is stored separately from its requested setting. After a
+late `setStepSize()`, the Context clock, thermostat state updates and thermal
+velocity offset use the captured physical step size. This is an approved
+compatibility exception: the supplied Reference kernel integrates with the old
+step size while advancing its clock with the new one. Its thermal velocity
+offset also reads the new value. Reference fixtures repair only the recorded
+clock; their position and velocity propagation is unchanged.
+
+### Frequency filtering and adaptation
+
+A segment contains `L = ceil(segment_length/dt)` steps. Its noise is generated
+with an FFT of length `M = 3*L`, retaining the central `L` samples. Rust uses all
+`floor(M/2)+1` real-FFT frequency bins at angular frequencies
+`omega[k] = 2*pi*k/(M*dt)`, including the Nyquist component when `M` is even.
+This is the second approved exception. The supplied kernel uses `(M+1)/2` bins,
+leaving the even-length Nyquist component as unfiltered white noise. With odd
+`M`, its frequency spacing also differs from the actual FFT spacing. A zero-K
+bath with a cutoff below every nonzero frequency therefore still moves particles
+in the supplied even-length implementation; the corrected implementation does
+not. The adapted-friction array gains one element for even `M`, and its frequency
+interpretation follows the actual FFT grid for both parities.
+
+The target quantum-oscillator spectrum, deconvolution, logistic cutoff and
+finite-step Langevin compensation follow `QTBIntegratorUtilities` and
+`ReferenceQTBDynamics`. The deconvolution uses the corrected frequency spacing
+and the complete bin count. After each segment, zero-padded velocity and random
+force transforms estimate the fluctuation-dissipation residual for each type.
+The rate-scaled residual updates that type's friction spectrum, with coefficients
+clamped at zero. Temperature changes recompute the target spectrum at the next
+boundary; adaptation still uses the preceding segment's recorded data.
+
+Friction must be positive when creating a Context because the supplied
+spectral equations are singular at zero friction. Segment length and cutoff
+must be positive and finite, and adaptation rates must be nonnegative and
+finite. Invalid particle indices and unequal masses within a type produce
+errors. These checks replace undefined or nonfinite source behavior for invalid
+configurations.
+
+### Spectrum and memory optimization
+
+The source constructs a dense deconvolution matrix using cubic work. With
+`M_ij = dw*C_ij*scale_i`, that matrix action is `M^T*(M*f)`. Rust evaluates the
+two factors directly and reuses a single row buffer. The same 20 iterations now
+require quadratic work and linear auxiliary memory in the frequency count.
+`scripts/benchmark-qtb-spectrum.sh` compares the original frequency grid against
+the unmodified source utility in 58 conditions: 7,608 values agree with maximum
+absolute error `2.42e-12` and scaled relative error `3.68e-14`.
+
+| Frequencies | Rust median seconds | Reference median seconds | Speedup |
+| --- | --- | --- | --- |
+| 512 | 0.01388 | 0.83537 | 60.2 |
+| 1500 | 0.11615 | 20.55003 | 177.0 |
+
+Both utilities run on one CPU thread. These are medians of three runs; median
+peak process RSS for the complete 58-case process is 3,052 KiB for Rust and
+24,044 KiB for Reference. These timings measure spectrum construction alone.
+
+The trajectory implementation caches FFT plans and scratch buffers. It uses each
+degree-of-freedom index as a ChaCha stream identifier, retains its word position
+and regenerates each overlapping white-noise window. This preserves the shared
+samples between adjacent windows without storing the white-noise history.
+Random forces require `24*N*L` bytes; segment velocities require another
+`24*N*L` bytes only when adaptation is enabled. The source stores `120*N*L`
+bytes for these three histories. Adapted spectra initially share storage and
+copy only when a type is updated. FFT scratch and type metadata are additional.
+The tradeoff is regenerating three windows' worth of Gaussian samples per new
+segment. A direct DFT test checks the reconstructed windows across odd and even
+segment lengths. Warm f64 CPU steps, including segment boundaries, allocate no
+new dense particle buffers.
+
+### Numerical coverage and performance
+
+The reference fixture checks 864 deterministic states and 53,136 values across
+constraints, virtual sites, fixed particles, types, captured settings, force
+groups, parameter changes and nested/direct-child execution. Maximum position,
+velocity, force and kinetic-energy differences are respectively zero,
+`4.34e-19`, `1.11e-16` and `6.71e-10` in OpenMM units. Clock values agree after
+repairing the source clock discrepancy.
+
+Eight positive-temperature or zero-point-noise conditions test every within-
+segment covariance against the analytic filtered Gaussian spectrum. Each uses
+9,216 independent coordinate streams; the largest mean and covariance residuals
+are 1.90 and 2.54 standard errors. A separate direct-DFT calculation checks 128
+adapted coefficients over four segments, including shared types, fixed particles
+and 15 zero clamps; its largest error is `2.19e-11`. API tests check delayed
+temperature changes, seed capture, object ownership, reinitialization and invalid
+inputs. The CPU fallback also covers f32 damping and captured clock behavior.
+
+Four harmonic-oscillator cases additionally use 32 independent particles at
+70/300 K and angular frequencies 20/100 per ps. Friction is 10/ps, the step is
+0.001 ps, the segment contains 501 steps, and one shared type adapts at rate
+0.01. Each run equilibrates for 10 ps and measures another 100 ps, recording
+10,000 samples. Across Rust and Reference, the mean potential energy differs
+from the quantum harmonic target by at most 1.27%, and its variance by at most
+5.00%. The corresponding Rust maxima are 0.76% and 3.77%. Raw kinetic energies
+are recorded separately and are not compared to the potential-energy target.
+These checks cover harmonic systems; they do not establish anharmonic leakage
+control or general molecular convergence.
+
+`scripts/benchmark-stochastic.sh qtb` measures single-thread free-particle
+integration at 300 K, friction 0.7/ps, `dt=0.001 ps`, 33 steps per segment and
+cutoff 500/ps. All particles share a type. After 10 warmup steps, the
+8/4096/65536-particle cases time 9900/330/66 steps. Every timed run includes
+colored-noise generation. Initial spectrum construction is excluded. The table
+reports medians of three runs and maximum process RSS.
+
+| Adaptation rate | Particles | Rust steps/s | Reference steps/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 8 | 484769 | 97154 | 4816 | 7368 |
+| 0 | 4096 | 1242.97 | 237.19 | 9256 | 24480 |
+| 0 | 65536 | 74.18 | 15.79 | 74320 | 281928 |
+| 0.01 | 8 | 340090 | 93154 | 4748 | 7552 |
+| 0.01 | 4096 | 751.46 | 237.23 | 12412 | 24328 |
+| 0.01 | 65536 | 29.71 | 15.80 | 124880 | 281972 |
+
+The Reference benchmark explicitly selects one worker through a small
+`ReferencePlatform` subclass; its default pool otherwise uses the number of
+online CPUs. Source and Rust frequency grids differ by the approved correction,
+and their random paths differ. These timing cases check finite raw kinetic
+energy, the clock and step count. Noise statistics and adaptation are validated
+separately. The tests do not establish equilibrium for a molecular force field,
+zero-point leakage control in anharmonic systems or GPU performance. Raw kinetic
+energy is reported as `sum(m*v^2/2)`; classical temperature and pressure formulas
+must not be interpreted as quantum thermodynamic estimates. Checkpoint and state
+serialization of QTB histories remain part of the unfinished serialization work.
+
 ## Documentation discrepancies found during implementation
 
 - All four Monte Carlo barostat constructor comments call the rigid scaling center a
@@ -1154,6 +1296,13 @@ platforms are not included.
   atom and the low-absolute-energy guard also disables the relative chain.
   Its kinetic-energy API omits relative and unthermostated motion. The approved
   exceptions above correct all three implementation defects.
+
+- `QTBIntegrator.h` says step size is fixed at Context creation, which matches
+  its propagation kernel, but the supplied Reference clock and thermal velocity
+  offset read the later requested value. The approved exception uses the captured
+  physical step size consistently. Its documented adapted-friction grid also
+  omits the even-length Nyquist bin and uses a frequency spacing inconsistent
+  with odd-length FFTs; the corrected API exposes every actual FFT bin.
 
 Implementation and reference tests take precedence over outdated descriptions.
 

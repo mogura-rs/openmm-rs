@@ -1,4 +1,6 @@
 #include <openmm/BrownianIntegrator.h>
+#include <openmm/QTBIntegrator.h>
+#include <ReferencePlatform.h>
 #include <openmm/DPDIntegrator.h>
 #include <openmm/HarmonicBondForce.h>
 #include <openmm/Context.h>
@@ -17,6 +19,12 @@
 #include <memory>
 #include <sstream>
 using namespace OpenMM;
+class SerialReference : public ReferencePlatform {
+public:
+    void contextCreated(ContextImpl& context, const std::map<std::string, std::string>&) const override {
+        ReferencePlatform::contextCreated(context, {{"Threads", "1"}});
+    }
+};
 int main(int argc,char**argv) {
     std::string kind=argc>1?argv[1]:"langevin";
     int n=argc>2?std::stoi(argv[2]):4096;
@@ -25,6 +33,7 @@ int main(int argc,char**argv) {
     System system;
     for(int i=0;i<n;++i)system.addParticle(1);
     bool dpd=kind=="dpd";
+    bool qtb=kind.substr(0,4)=="qtb_";
     int side=std::max(5,(int)std::ceil(std::cbrt(n)));
     if(dpd) {
         double length=0.3*side;
@@ -54,6 +63,13 @@ int main(int argc,char**argv) {
         }
         integrator.reset(value);
     }
+    else if(qtb) {
+        auto* value=new QTBIntegrator(temperature,0.7,0.001);
+        value->setSegmentLength(0.03275);value->setDefaultAdaptationRate(kind=="qtb_fixed" ? 0 : 0.01);
+        value->setRandomNumberSeed(3721);
+        for(int particle=0;particle<n;++particle)value->setParticleType(particle,0);
+        integrator.reset(value);
+    }
     else if(dpd) {
         auto* value=new DPDIntegrator(temperature,0.7,0.7,0.001);value->setRandomNumberSeed(3721);value->setIntegrationForceGroups(0);integrator.reset(value);
     }
@@ -69,7 +85,8 @@ int main(int argc,char**argv) {
         auto* value=new BrownianIntegrator(temperature,0.7,0.001);
         value->setRandomNumberSeed(3721);integrator.reset(value);
     } else throw std::runtime_error("unknown integrator");
-    Context context(system,*integrator,Platform::getPlatformByName("Reference"));
+    SerialReference serial;
+    Context context(system,*integrator,qtb ? serial : Platform::getPlatformByName("Reference"));
     std::vector<Vec3> positions(n);
     if(dpd)for(int i=0;i<n;++i)positions[i]=Vec3(0.3*(i%side),0.3*((i/side)%side),0.3*(i/(side*side)));
     context.setPositions(positions);
@@ -108,5 +125,5 @@ int main(int argc,char**argv) {
     Vec3 momentum;
     if(dpd) {auto state=context.getState(State::Velocities);for(auto v: state.getVelocities())momentum+=v;}
     std::ostringstream expectedStream;expectedStream<<std::setprecision(17)<<expected;
-    std::cout<<std::setprecision(17)<<"{\"implementation\":\"openmm-reference\",\"precision\":\"f64\",\"api\":\"Context.step\",\"integrator\":\""<<kind<<"\",\"temperature\":"<<temperature<<",\"particles\":"<<n<<",\"iterations\":"<<iterations<<",\"seconds\":"<<seconds<<",\"evaluations_per_second\":"<<iterations/seconds<<",\"energy\":0,\"kinetic_energy\":"<<energy<<",\"expected_kinetic_energy\":"<<((kind.substr(0,5)=="nose_" || dpd) ? "null" : expectedStream.str())<<",\"kinetic_energy_stddev\":"<<stddev<<",\"simulation_time\":"<<context.getTime()<<",\"step_count\":"<<context.getStepCount()<<",\"adaptive\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<",\"maximum_step_size\":0.001,\"error_tolerance\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"0.00001":"null")<<",\"compound_switch_each_step\":"<<(compound?"true":"false")<<",\"clock_repair\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<",\"momentum\":["<<momentum[0]<<","<<momentum[1]<<","<<momentum[2]<<"]}\n";
+    std::cout<<std::setprecision(17)<<"{\"implementation\":\"openmm-reference\",\"precision\":\"f64\",\"api\":\"Context.step\",\"integrator\":\""<<kind<<"\",\"temperature\":"<<temperature<<",\"particles\":"<<n<<",\"iterations\":"<<iterations<<",\"seconds\":"<<seconds<<",\"evaluations_per_second\":"<<iterations/seconds<<",\"energy\":0,\"kinetic_energy\":"<<energy<<",\"expected_kinetic_energy\":"<<((kind.substr(0,5)=="nose_" || dpd || qtb) ? "null" : expectedStream.str())<<",\"kinetic_energy_stddev\":"<<stddev<<",\"simulation_time\":"<<context.getTime()<<",\"step_count\":"<<context.getStepCount()<<",\"adaptive\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<",\"maximum_step_size\":0.001,\"error_tolerance\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"0.00001":"null")<<",\"compound_switch_each_step\":"<<(compound?"true":"false")<<",\"clock_repair\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<",\"momentum\":["<<momentum[0]<<","<<momentum[1]<<","<<momentum[2]<<"]}\n";
 }

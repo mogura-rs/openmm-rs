@@ -18,7 +18,7 @@ def main():
             assert math.isfinite(record["kinetic_energy"]) and record["kinetic_energy"] > 0, record
             for got, target in zip(record["momentum"], [0.15,0.3,0.45]):
                 assert math.isclose(got, target*record["particles"], rel_tol=2e-11, abs_tol=2e-10), record
-        elif record.get("integrator", "").startswith("nose_"):
+        elif record.get("integrator", "").startswith(("nose_", "qtb_")):
             assert math.isfinite(record["kinetic_energy"]) and record["kinetic_energy"] > 0, record
         elif record.get("api") == "Context.step":
             if "expected_kinetic_energy" in record:
@@ -78,6 +78,8 @@ def main():
         note = "Matched deterministic free-particle Nose-Hoover integration at 300 K, absolute collision frequency 0.7/ps, dt=0.001 ps, chain length 3, 3 MTS and 7 Yoshida-Suzuki stages, with 10 warmup steps. Pair cases use two individual atoms plus disjoint pairs with relative temperature 30 K and frequency 2/ps. Alternating atoms start at velocities (0.1,0.2,0.3) and (0.2,0.4,0.6) nm/ps, so both absolute and relative baths are exercised. Final full-particle KE is checked between implementations. This timing run is not an equilibrium or force-field test. Optimized CPU/GPU platforms are not measured."
     if all(record.get("integrator") == "dpd" for rows in groups.values() for record in rows):
         note = "Matched f64 DPD integration at dt=0.001 ps, friction 0.7/ps, cutoff 0.7 nm and 10 warmup steps. Particles start on a 0.3 nm cubic lattice in a periodic cube with side max(5,ceil(cuberoot(N)))*0.3 nm. Alternating velocities are (0.1,0.2,0.3) and (0.2,0.4,0.6) nm/ps. Potential forces are excluded. Final momentum and clock are checked; zero-temperature KE is also compared across implementations. Positive-temperature paths differ. This short timing run is not an equilibrium test. Optimized CPU/GPU platforms are not measured."
+    if all(record.get("integrator", "").startswith("qtb_") for rows in groups.values() for record in rows):
+        note = "Single-thread f64 free-particle QTB integration at 300 K, friction 0.7/ps, dt=0.001 ps, 33 steps per segment, cutoff 500/ps, one shared particle type and 10 warmup steps. Adaptation rate is zero for qtb_fixed and 0.01 for qtb_adaptive. Both implementations include colored-noise generation during timing; startup spectrum generation is excluded. Rust uses the approved exact FFT frequency grid, including the Nyquist bin; the supplied Reference kernel uses its original frequency grid. Random paths differ. Only finite kinetic energy, clock and step count are checked here; noise moments and adaptation are validated separately. This timing run does not establish quantum thermodynamic convergence or GPU performance."
     if all(record.get("compound_switch_each_step") for rows in groups.values() for record in rows):
         note += " CompoundIntegrator alternates between two children every step; selection overhead is included."
     if all(record.get("adaptive") for rows in groups.values() for record in rows):

@@ -734,7 +734,7 @@ impl<B: Backend> Context<B> {
             self.system.forces_mut()[index].update_context_velocities(
                 &mut self.velocities,
                 &self.host_masses,
-                self.integrator.step_size(),
+                self.integrator.actual_step_size(),
                 self.step_count,
             );
             if let Some(vectors) = self.periodic_box_vectors {
@@ -782,7 +782,7 @@ impl<B: Backend> Context<B> {
                 max_step_size: limit,
             },
         )?;
-        let dt = integrator.step_size();
+        let dt = integrator.actual_step_size();
         drop(child);
         self.compute_virtual_sites();
         self.time += dt;

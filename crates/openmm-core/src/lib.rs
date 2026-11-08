@@ -68,3 +68,4 @@ pub use integrators::variable::{VariableLangevinIntegrator, VariableVerletIntegr
 pub use integrators::nose_hoover::{NoseHooverChain, NoseHooverIntegrator};
 
 pub use integrators::dpd::DPDIntegrator;
+pub use integrators::qtb::QTBIntegrator;

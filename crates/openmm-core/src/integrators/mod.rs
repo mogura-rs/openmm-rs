@@ -3,6 +3,7 @@ pub mod compound;
 pub mod dpd;
 pub mod langevin;
 pub mod nose_hoover;
+pub mod qtb;
 mod random;
 pub mod variable;
 pub mod verlet;
@@ -94,6 +95,11 @@ pub trait Integrator<B: Backend>: Send + Sync {
 
     /// Step size in ps.
     fn step_size(&self) -> f64;
+
+    /// Physical duration of a step when settings were captured at initialization.
+    fn actual_step_size(&self) -> f64 {
+        self.step_size()
+    }
 
     fn constraint_tolerance(&self) -> f64 {
         1e-5

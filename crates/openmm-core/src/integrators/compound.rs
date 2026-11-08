@@ -109,6 +109,13 @@ impl<B: Backend> Integrator<B> for CompoundIntegrator<B> {
         self.children[self.current].lock().unwrap().step_size()
     }
 
+    fn actual_step_size(&self) -> f64 {
+        self.children[self.current]
+            .lock()
+            .unwrap()
+            .actual_step_size()
+    }
+
     fn set_step_size(&mut self, value: f64) {
         self.children[self.current]
             .lock()

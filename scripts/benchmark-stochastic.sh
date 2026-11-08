@@ -8,7 +8,7 @@ jobs="${SLURM_CPUS_PER_TASK:-4}"
 cargo build --release --locked -p openmm-core --example stochastic_bench --jobs "$jobs"
 "${CXX:-c++}" -std=c++17 -O3 tests/reference/stochastic_bench.cpp \
     -I "$reference_source/openmmapi/include" -I "$reference_source/olla/include" \
-    -I "$reference_source/serialization/include" \
+    -I "$reference_source/serialization/include" -I "$reference_source/platforms/reference/include" \
     -L "$reference_build" -Wl,-rpath,"$(pwd)/$reference_build" -lOpenMM \
     -o target/reference-stochastic-bench
 time_command="$(type -P time)"
@@ -20,11 +20,12 @@ case "${1:-fixed}" in
     compound) kinds=(compound_verlet compound_langevin) ;;
     nose) kinds=(nose_hoover nose_pairs) ;;
     dpd) kinds=(dpd) ;;
-    *) echo "Expected fixed, variable, compound, nose or dpd" >&2; exit 2 ;;
+    qtb) kinds=(qtb_fixed qtb_adaptive) ;;
+    *) echo "Expected fixed, variable, compound, nose, dpd or qtb" >&2; exit 2 ;;
 esac
 for kind in "${kinds[@]}"; do
     temperatures=(0 300)
-    if [[ "$kind" == nose_* ]]; then temperatures=(300); fi
+    if [[ "$kind" == nose_* || "$kind" == qtb_* ]]; then temperatures=(300); fi
     if [[ "$kind" == verlet || "$kind" == variable_verlet || "$kind" == compound_verlet ]]; then temperatures=(0); fi
     for temperature in "${temperatures[@]}"; do
         directory="benchmark-results/stochastic/$kind/$temperature"
@@ -40,6 +41,13 @@ for kind in "${kinds[@]}"; do
                     8) iterations=3000 ;;
                     4096) iterations=100 ;;
                     65536) iterations=10 ;;
+                esac
+            fi
+            if [[ "$kind" == qtb_* ]]; then
+                case "$particles" in
+                    8) iterations=9900 ;;
+                    4096) iterations=330 ;;
+                    65536) iterations=66 ;;
                 esac
             fi
             for repetition in 1 2 3; do

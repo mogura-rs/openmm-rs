@@ -3,8 +3,8 @@ use burn::tensor::TensorData;
 use openmm_core::{
     integrators::langevin::BOLTZMANN, tensor::from_floats, BrownianIntegrator, CompoundIntegrator,
     Context, DPDIntegrator, HarmonicBondForce, Integrator, LangevinMiddleIntegrator,
-    NoseHooverIntegrator, StateFlags, System, VariableLangevinIntegrator, VariableVerletIntegrator,
-    VerletIntegrator,
+    NoseHooverIntegrator, QTBIntegrator, StateFlags, System, VariableLangevinIntegrator,
+    VariableVerletIntegrator, VerletIntegrator,
 };
 use std::{hint::black_box, time::Instant};
 
@@ -21,6 +21,7 @@ fn main() {
         system.add_particle(1.0);
     }
     let dpd = kind == "dpd";
+    let qtb = kind.starts_with("qtb_");
     let side = (n as f64).cbrt().ceil().max(5.) as usize;
     if dpd {
         let length = 0.3 * side as f64;
@@ -34,6 +35,16 @@ fn main() {
         system.add_force(Box::new(marker));
     }
     let integrator: Box<dyn Integrator<B>> = match kind {
+        "qtb_fixed" | "qtb_adaptive" => {
+            let mut value = QTBIntegrator::new(temperature, 0.7, 0.001);
+            value.set_segment_length(0.03275);
+            value.set_default_adaptation_rate(if kind == "qtb_fixed" { 0.0 } else { 0.01 });
+            value.set_random_number_seed(3721);
+            for particle in 0..n {
+                value.set_particle_type(particle as i32, 0);
+            }
+            Box::new(value)
+        }
         "dpd" => {
             let mut value = DPDIntegrator::new(temperature, 0.7, 0.7, 0.001);
             value.set_random_number_seed(3721);
@@ -165,7 +176,7 @@ fn main() {
     };
     let expected = 0.5 * (3.0 * n as f64 * variance + mean_squared);
     let stddev = (1.5 * n as f64 * variance * variance + variance * mean_squared).sqrt();
-    let expected_json = if kind.starts_with("nose_") || dpd {
+    let expected_json = if kind.starts_with("nose_") || dpd || qtb {
         "null".to_string()
     } else {
         expected.to_string()
