@@ -18,13 +18,17 @@ pub struct AngleParam {
 
 #[derive(Clone)]
 pub struct HarmonicAngleForce {
+    metadata: super::ForceMetadata,
     angles: Vec<AngleParam>,
     use_pbc: bool,
 }
 
 impl HarmonicAngleForce {
+    super::force_metadata!();
     pub fn new() -> Self {
         Self {
+            metadata: super::ForceMetadata::new("HarmonicAngleForce"),
+
             angles: Vec::new(),
             use_pbc: false,
         }
@@ -93,6 +97,7 @@ impl Default for HarmonicAngleForce {
 }
 
 impl<B: Backend> Force<B> for HarmonicAngleForce {
+    super::force_metadata_impl!();
     fn calc_forces_and_energy(
         &self,
         positions: &Tensor<B, 2>,

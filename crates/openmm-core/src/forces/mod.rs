@@ -16,6 +16,52 @@ use burn::prelude::*;
 use std::any::Any;
 use std::collections::HashMap;
 
+#[derive(Clone)]
+pub(crate) struct ForceMetadata {
+    group: u32,
+    name: String,
+}
+
+impl ForceMetadata {
+    fn new(name: &str) -> Self {
+        Self {
+            group: 0,
+            name: name.to_owned(),
+        }
+    }
+}
+
+macro_rules! force_metadata {
+    () => {
+        pub fn force_group(&self) -> u32 {
+            self.metadata.group
+        }
+        pub fn set_force_group(&mut self, group: u32) {
+            assert!(group < 32, "force group must be between zero and 31");
+            self.metadata.group = group;
+        }
+        pub fn name(&self) -> &str {
+            &self.metadata.name
+        }
+        pub fn set_name(&mut self, name: &str) {
+            self.metadata.name = name.to_owned();
+        }
+    };
+}
+pub(crate) use force_metadata;
+
+macro_rules! force_metadata_impl {
+    () => {
+        fn force_group(&self) -> u32 {
+            self.metadata.group
+        }
+        fn name(&self) -> &str {
+            &self.metadata.name
+        }
+    };
+}
+pub(crate) use force_metadata_impl;
+
 pub trait AsAny {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -51,6 +97,24 @@ where
 /// Returned energy: kJ/mol.
 pub trait Force<B: Backend>: Send + Sync + AsAny + ForceClone<B> {
     fn initialize(&mut self, _num_particles: usize, _box_vectors: Option<&[[f64; 3]; 3]>) {}
+
+    fn force_group(&self) -> u32 {
+        0
+    }
+
+    fn name(&self) -> &str {
+        "Force"
+    }
+
+    fn calc_forces_and_energy_groups(
+        &self,
+        positions: &Tensor<B, 2>,
+        box_vectors: Option<&[[f64; 3]; 3]>,
+        groups: u32,
+    ) -> Option<(Tensor<B, 2>, f64)> {
+        (groups & (1 << self.force_group()) != 0)
+            .then(|| self.calc_forces_and_energy(positions, box_vectors))
+    }
 
     fn calc_forces_and_energy(
         &self,

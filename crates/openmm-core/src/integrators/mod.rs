@@ -25,6 +25,14 @@ pub(crate) fn fixed_particles<B: Backend>(masses: &Tensor<B, 1>) -> Tensor<B, 2,
 
 /// Time-stepping algorithm. Operates on raw tensors (nm, nm/ps).
 pub trait Integrator<B: Backend>: Send + Sync {
+    fn integration_force_groups(&self) -> u32 {
+        u32::MAX
+    }
+
+    fn set_integration_force_groups(&mut self, _groups: u32) {
+        panic!("this integrator does not support changing force groups");
+    }
+
     /// Advance positions and velocities by one step given current forces and masses.
     /// positions:  [N, 3] nm
     /// velocities: [N, 3] nm/ps

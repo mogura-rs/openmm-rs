@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct CustomAngleForce {
+    metadata: super::ForceMetadata,
     energy_expr: Expression,
     per_angle_params: Vec<String>,
     angles: Vec<AngleRecord>,
@@ -27,8 +28,10 @@ struct AngleRecord {
 }
 
 impl CustomAngleForce {
+    super::force_metadata!();
     pub fn new(energy: &str) -> Result<Self, crate::expression::ParseError> {
         Ok(Self {
+            metadata: super::ForceMetadata::new("CustomAngleForce"),
             energy_expr: Expression::parse(energy)?,
             per_angle_params: Vec::new(),
             angles: Vec::new(),
@@ -156,6 +159,7 @@ impl CustomAngleForce {
 }
 
 impl<B: Backend> Force<B> for CustomAngleForce {
+    super::force_metadata_impl!();
     fn calc_forces_and_energy(
         &self,
         positions: &Tensor<B, 2>,

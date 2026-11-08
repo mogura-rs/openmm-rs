@@ -15,13 +15,17 @@ pub struct BondParam {
 
 #[derive(Clone)]
 pub struct HarmonicBondForce {
+    metadata: super::ForceMetadata,
     bonds: Vec<BondParam>,
     use_pbc: bool,
 }
 
 impl HarmonicBondForce {
+    super::force_metadata!();
     pub fn new() -> Self {
         Self {
+            metadata: super::ForceMetadata::new("HarmonicBondForce"),
+
             bonds: Vec::new(),
             use_pbc: false,
         }
@@ -80,6 +84,7 @@ impl Default for HarmonicBondForce {
 }
 
 impl<B: Backend> Force<B> for HarmonicBondForce {
+    super::force_metadata_impl!();
     fn calc_forces_and_energy(
         &self,
         positions: &Tensor<B, 2>,

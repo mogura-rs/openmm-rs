@@ -3,6 +3,7 @@ use crate::units::BoxVectors;
 use burn::prelude::*;
 use std::collections::HashMap;
 
+#[derive(Clone, Copy, Debug)]
 pub struct StateFlags {
     pub positions: bool,
     pub velocities: bool,

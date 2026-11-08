@@ -31,13 +31,17 @@ impl RBTorsionParam {
 
 #[derive(Clone)]
 pub struct RBTorsionForce {
+    metadata: super::ForceMetadata,
     torsions: Vec<RBTorsionParam>,
     use_pbc: bool,
 }
 
 impl RBTorsionForce {
+    super::force_metadata!();
     pub fn new() -> Self {
         Self {
+            metadata: super::ForceMetadata::new("RBTorsionForce"),
+
             torsions: Vec::new(),
             use_pbc: false,
         }
@@ -85,6 +89,7 @@ impl Default for RBTorsionForce {
 }
 
 impl<B: Backend> Force<B> for RBTorsionForce {
+    super::force_metadata_impl!();
     fn calc_forces_and_energy(
         &self,
         positions: &Tensor<B, 2>,

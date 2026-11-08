@@ -154,7 +154,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 
 ### Next
 1. Complete the compatibility checklist in `docs/compatibility.md`.
-2. Add force groups and pressure control, and broaden numerical coverage.
+2. Add pressure control and minimization, and broaden numerical coverage.
 3. Extend custom expressions/forces, integrators and Python API compatibility.
 4. Implement resident GPU force evaluation and validate through Slurm.
 5. Measure and optimize throughput and peak host/device memory without weakening numerical validation.

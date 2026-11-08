@@ -14,9 +14,17 @@ pub struct BrownianIntegrator {
     /// Friction coefficient in ps^-1.
     friction: f64,
     constraint_tolerance: f64,
+    integration_force_groups: u32,
 }
 
 impl BrownianIntegrator {
+    pub fn integration_force_groups(&self) -> u32 {
+        self.integration_force_groups
+    }
+    pub fn set_integration_force_groups(&mut self, groups: u32) {
+        self.integration_force_groups = groups;
+    }
+
     pub fn new(temperature: f64, friction: f64, step_size: f64) -> Self {
         assert!(
             temperature.is_finite() && temperature >= 0.0,
@@ -35,6 +43,7 @@ impl BrownianIntegrator {
             temperature,
             friction,
             constraint_tolerance: 1e-5,
+            integration_force_groups: u32::MAX,
         }
     }
 
@@ -75,6 +84,13 @@ impl BrownianIntegrator {
 }
 
 impl<B: Backend> Integrator<B> for BrownianIntegrator {
+    fn integration_force_groups(&self) -> u32 {
+        self.integration_force_groups
+    }
+    fn set_integration_force_groups(&mut self, groups: u32) {
+        self.integration_force_groups = groups;
+    }
+
     fn step(
         &self,
         positions: &mut Tensor<B, 2>,

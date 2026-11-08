@@ -183,13 +183,37 @@ impl PyState {
 #[pyclass(unsendable, name = "VerletIntegrator")]
 struct PyVerletIntegrator {
     step_size: f64,
+    groups: u32,
+    tolerance: f64,
 }
 
 #[pymethods]
 impl PyVerletIntegrator {
+    fn get_integration_force_groups(&self) -> i32 {
+        self.groups as i32
+    }
+    fn set_integration_force_groups(&mut self, groups: i64) -> PyResult<()> {
+        self.groups = group_mask(groups)?;
+        Ok(())
+    }
+    fn get_constraint_tolerance(&self) -> f64 {
+        self.tolerance
+    }
+    fn set_constraint_tolerance(&mut self, tolerance: f64) -> PyResult<()> {
+        if !tolerance.is_finite() || tolerance <= 0.0 || tolerance >= 1.0 {
+            return Err(err("constraint tolerance must be between zero and one"));
+        }
+        self.tolerance = tolerance;
+        Ok(())
+    }
+
     #[new]
     fn new(step_size: f64) -> Self {
-        Self { step_size }
+        Self {
+            step_size,
+            groups: u32::MAX,
+            tolerance: 1e-5,
+        }
     }
 
     #[getter]
@@ -207,16 +231,38 @@ struct PyLangevinMiddleIntegrator {
     temperature: f64,
     friction: f64,
     step_size: f64,
+    groups: u32,
+    tolerance: f64,
 }
 
 #[pymethods]
 impl PyLangevinMiddleIntegrator {
+    fn get_integration_force_groups(&self) -> i32 {
+        self.groups as i32
+    }
+    fn set_integration_force_groups(&mut self, groups: i64) -> PyResult<()> {
+        self.groups = group_mask(groups)?;
+        Ok(())
+    }
+    fn get_constraint_tolerance(&self) -> f64 {
+        self.tolerance
+    }
+    fn set_constraint_tolerance(&mut self, tolerance: f64) -> PyResult<()> {
+        if !tolerance.is_finite() || tolerance <= 0.0 || tolerance >= 1.0 {
+            return Err(err("constraint tolerance must be between zero and one"));
+        }
+        self.tolerance = tolerance;
+        Ok(())
+    }
+
     #[new]
     fn new(temperature: f64, friction: f64, step_size: f64) -> Self {
         Self {
             temperature,
             friction,
             step_size,
+            groups: u32::MAX,
+            tolerance: 1e-5,
         }
     }
 
@@ -253,16 +299,38 @@ struct PyBrownianIntegrator {
     temperature: f64,
     friction: f64,
     step_size: f64,
+    groups: u32,
+    tolerance: f64,
 }
 
 #[pymethods]
 impl PyBrownianIntegrator {
+    fn get_integration_force_groups(&self) -> i32 {
+        self.groups as i32
+    }
+    fn set_integration_force_groups(&mut self, groups: i64) -> PyResult<()> {
+        self.groups = group_mask(groups)?;
+        Ok(())
+    }
+    fn get_constraint_tolerance(&self) -> f64 {
+        self.tolerance
+    }
+    fn set_constraint_tolerance(&mut self, tolerance: f64) -> PyResult<()> {
+        if !tolerance.is_finite() || tolerance <= 0.0 || tolerance >= 1.0 {
+            return Err(err("constraint tolerance must be between zero and one"));
+        }
+        self.tolerance = tolerance;
+        Ok(())
+    }
+
     #[new]
     fn new(temperature: f64, friction: f64, step_size: f64) -> Self {
         Self {
             temperature,
             friction,
             step_size,
+            groups: u32::MAX,
+            tolerance: 1e-5,
         }
     }
 
@@ -311,6 +379,31 @@ impl PyNonbondedForce {
 
 #[pymethods]
 impl PyNonbondedForce {
+    fn get_reciprocal_space_force_group(&self) -> i32 {
+        self.inner.reciprocal_space_force_group()
+    }
+    fn set_reciprocal_space_force_group(&mut self, group: i32) {
+        self.inner.set_reciprocal_space_force_group(group);
+    }
+    fn get_include_direct_space(&self) -> bool {
+        self.inner.include_direct_space()
+    }
+    fn set_include_direct_space(&mut self, enabled: bool) {
+        self.inner.set_include_direct_space(enabled);
+    }
+    fn get_force_group(&self) -> u32 {
+        self.inner.force_group()
+    }
+    fn set_force_group(&mut self, group: u32) {
+        self.inner.set_force_group(group);
+    }
+    fn get_name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.inner.set_name(name);
+    }
+
     #[new]
     fn new() -> Self {
         Self {
@@ -596,6 +689,19 @@ impl PyCustomExternalForce {
 
 #[pymethods]
 impl PyCustomExternalForce {
+    fn get_force_group(&self) -> u32 {
+        self.inner.force_group()
+    }
+    fn set_force_group(&mut self, group: u32) {
+        self.inner.set_force_group(group);
+    }
+    fn get_name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.inner.set_name(name);
+    }
+
     #[new]
     fn new(energy: &str) -> PyResult<Self> {
         let inner = CustomExternalForce::new(energy).map_err(|e| err(&e.to_string()))?;
@@ -691,6 +797,19 @@ impl PyCustomBondForce {
 
 #[pymethods]
 impl PyCustomBondForce {
+    fn get_force_group(&self) -> u32 {
+        self.inner.force_group()
+    }
+    fn set_force_group(&mut self, group: u32) {
+        self.inner.set_force_group(group);
+    }
+    fn get_name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.inner.set_name(name);
+    }
+
     #[new]
     fn new(energy: &str) -> PyResult<Self> {
         let inner = CustomBondForce::new(energy).map_err(|e| err(&e.to_string()))?;
@@ -795,6 +914,19 @@ impl PyCustomAngleForce {
 
 #[pymethods]
 impl PyCustomAngleForce {
+    fn get_force_group(&self) -> u32 {
+        self.inner.force_group()
+    }
+    fn set_force_group(&mut self, group: u32) {
+        self.inner.set_force_group(group);
+    }
+    fn get_name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.inner.set_name(name);
+    }
+
     #[new]
     fn new(energy: &str) -> PyResult<Self> {
         let inner = CustomAngleForce::new(energy).map_err(|e| err(&e.to_string()))?;
@@ -907,6 +1039,19 @@ impl PyCustomNonbondedForce {
 
 #[pymethods]
 impl PyCustomNonbondedForce {
+    fn get_force_group(&self) -> u32 {
+        self.inner.force_group()
+    }
+    fn set_force_group(&mut self, group: u32) {
+        self.inner.set_force_group(group);
+    }
+    fn get_name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.inner.set_name(name);
+    }
+
     #[new]
     fn new(energy: &str) -> PyResult<Self> {
         let inner = CustomNonbondedForce::new(energy).map_err(|e| err(&e.to_string()))?;
@@ -1030,6 +1175,19 @@ impl PyCustomTorsionForce {
 
 #[pymethods]
 impl PyCustomTorsionForce {
+    fn get_force_group(&self) -> u32 {
+        self.inner.force_group()
+    }
+    fn set_force_group(&mut self, group: u32) {
+        self.inner.set_force_group(group);
+    }
+    fn get_name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.inner.set_name(name);
+    }
+
     #[new]
     fn new(energy: &str) -> PyResult<Self> {
         let inner = CustomTorsionForce::new(energy).map_err(|e| err(&e.to_string()))?;
@@ -1147,6 +1305,19 @@ impl PyHarmonicBondForce {
 
 #[pymethods]
 impl PyHarmonicBondForce {
+    fn get_force_group(&self) -> u32 {
+        self.inner.force_group()
+    }
+    fn set_force_group(&mut self, group: u32) {
+        self.inner.set_force_group(group);
+    }
+    fn get_name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.inner.set_name(name);
+    }
+
     #[new]
     fn new() -> Self {
         Self {
@@ -1206,6 +1377,19 @@ impl PyHarmonicAngleForce {
 
 #[pymethods]
 impl PyHarmonicAngleForce {
+    fn get_force_group(&self) -> u32 {
+        self.inner.force_group()
+    }
+    fn set_force_group(&mut self, group: u32) {
+        self.inner.set_force_group(group);
+    }
+    fn get_name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.inner.set_name(name);
+    }
+
     #[new]
     fn new() -> Self {
         Self {
@@ -1280,6 +1464,19 @@ impl PyPeriodicTorsionForce {
 
 #[pymethods]
 impl PyPeriodicTorsionForce {
+    fn get_force_group(&self) -> u32 {
+        self.inner.force_group()
+    }
+    fn set_force_group(&mut self, group: u32) {
+        self.inner.set_force_group(group);
+    }
+    fn get_name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.inner.set_name(name);
+    }
+
     #[new]
     fn new() -> Self {
         Self {
@@ -1369,6 +1566,19 @@ impl PyRBTorsionForce {
 
 #[pymethods]
 impl PyRBTorsionForce {
+    fn get_force_group(&self) -> u32 {
+        self.inner.force_group()
+    }
+    fn set_force_group(&mut self, group: u32) {
+        self.inner.set_force_group(group);
+    }
+    fn get_name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.inner.set_name(name);
+    }
+
     #[new]
     fn new() -> Self {
         Self {
@@ -1598,20 +1808,29 @@ impl PySystem {
         let integrator: Box<dyn Integrator<B>> = if let Ok(integrator) =
             integrator.extract::<PyRef<'_, PyVerletIntegrator>>()
         {
-            Box::new(VerletIntegrator::new(integrator.step_size))
+            let mut core = VerletIntegrator::new(integrator.step_size);
+            core.set_constraint_tolerance(integrator.tolerance);
+            core.set_integration_force_groups(integrator.groups);
+            Box::new(core)
         } else if let Ok(integrator) = integrator.extract::<PyRef<'_, PyLangevinMiddleIntegrator>>()
         {
-            Box::new(LangevinMiddleIntegrator::new(
+            let mut core = LangevinMiddleIntegrator::new(
                 integrator.temperature,
                 integrator.friction,
                 integrator.step_size,
-            ))
+            );
+            core.set_constraint_tolerance(integrator.tolerance);
+            core.set_integration_force_groups(integrator.groups);
+            Box::new(core)
         } else if let Ok(integrator) = integrator.extract::<PyRef<'_, PyBrownianIntegrator>>() {
-            Box::new(BrownianIntegrator::new(
+            let mut core = BrownianIntegrator::new(
                 integrator.temperature,
                 integrator.friction,
                 integrator.step_size,
-            ))
+            );
+            core.set_constraint_tolerance(integrator.tolerance);
+            core.set_integration_force_groups(integrator.groups);
+            Box::new(core)
         } else {
             return Err(err("unsupported integrator type"));
         };
@@ -1786,7 +2005,8 @@ impl PyContext {
             .map_err(|error| err(&error.to_string()))
     }
 
-    #[pyo3(signature = (positions=false, velocities=false, forces=false, energy=false, parameters=false, parameter_derivatives=false))]
+    #[pyo3(signature = (positions=false, velocities=false, forces=false, energy=false, parameters=false, parameter_derivatives=false, groups=-1))]
+    #[allow(clippy::too_many_arguments)]
     fn get_state(
         &self,
         positions: bool,
@@ -1795,15 +2015,19 @@ impl PyContext {
         energy: bool,
         parameters: bool,
         parameter_derivatives: bool,
-    ) -> PyState {
-        PyState::from_core(self.inner.get_state(StateFlags {
-            positions,
-            velocities,
-            forces,
-            energy,
-            parameters,
-            parameter_derivatives,
-        }))
+        groups: i64,
+    ) -> PyResult<PyState> {
+        Ok(PyState::from_core(self.inner.get_state_groups(
+            StateFlags {
+                positions,
+                velocities,
+                forces,
+                energy,
+                parameters,
+                parameter_derivatives,
+            },
+            group_mask(groups)?,
+        )))
     }
 }
 
@@ -1827,4 +2051,11 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySystem>()?;
     m.add_class::<PyContext>()?;
     Ok(())
+}
+
+fn group_mask(groups: i64) -> PyResult<u32> {
+    if groups < i32::MIN as i64 || groups > u32::MAX as i64 {
+        return Err(err("force groups must be a 32-bit mask"));
+    }
+    Ok(groups as u32)
 }

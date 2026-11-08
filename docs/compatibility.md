@@ -44,10 +44,10 @@ revision in generated validation results.
 
 | Area | State | Outstanding work |
 | --- | --- | --- |
-| Core state and parameters | Partial | Groups, checkpointing and broader validation |
+| Core state and parameters | Partial | Force groups, integration masks and state filtering are implemented; checkpointing and broader validation remain |
 | Virtual sites | Partial | Five site types, nested dependencies and force redistribution are implemented; see the fractional symmetry exception below |
 | Bonded forces | Partial | Reference coverage, CMAP, GPU execution |
-| Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, switching and dispersion correction are implemented; reciprocal groups, complete API behavior and broader coverage remain |
+| Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Five force types and a scalar expression evaluator exist; broader API and numerical validation remain |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
@@ -58,14 +58,16 @@ revision in generated validation results.
 `scripts/validate-reference.sh` builds the external OpenMM Reference library and
 runs C++ fixtures against the Rust Python extension. Current fixtures cover seven
 integrator configurations at four time points, forty-one nonbonded configurations,
-seven virtual site configurations at three time points, and fifteen bonded/custom
-force configurations.
+seven virtual site configurations at three time points, fifteen bonded/custom
+force configurations, and 120 group/integration configurations.
 Nonbonded fixtures include Ewald, electrostatic/dispersion PME, neutral and charged
 systems, exceptions, runtime offsets, parameter updates and periodic box changes.
 Mesh parameters are fixed when a Context is initialized, as in the reference.
 The Reference kernel ignores switching for LJPME and uses global parameter defaults
 for the analytical dispersion coefficient. Runtime offsets affect pair and
 reciprocal terms but do not recompute that coefficient; parameter updates do.
+Group fixtures compare masks including the high bit, direct/reciprocal splitting,
+disabled direct-space terms, restricted integration, forces and kinetic energy.
 Use `scripts/benchmark-cpu.sh` after reference validation to compare exhaustive
 and cell traversal with the OpenMM Reference platform. It records process peak
 RSS and timing; optimized OpenMM CPU/GPU performance is a separate requirement.

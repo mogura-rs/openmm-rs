@@ -15,9 +15,17 @@ pub struct VerletIntegrator {
     /// Step size in ps.
     dt: f64,
     constraint_tolerance: f64,
+    integration_force_groups: u32,
 }
 
 impl VerletIntegrator {
+    pub fn integration_force_groups(&self) -> u32 {
+        self.integration_force_groups
+    }
+    pub fn set_integration_force_groups(&mut self, groups: u32) {
+        self.integration_force_groups = groups;
+    }
+
     pub fn new(step_size: f64) -> Self {
         assert!(
             step_size.is_finite() && step_size > 0.0,
@@ -26,6 +34,7 @@ impl VerletIntegrator {
         Self {
             dt: step_size,
             constraint_tolerance: 1e-5,
+            integration_force_groups: u32::MAX,
         }
     }
 
@@ -47,6 +56,13 @@ impl VerletIntegrator {
 }
 
 impl<B: Backend> Integrator<B> for VerletIntegrator {
+    fn integration_force_groups(&self) -> u32 {
+        self.integration_force_groups
+    }
+    fn set_integration_force_groups(&mut self, groups: u32) {
+        self.integration_force_groups = groups;
+    }
+
     fn step(
         &self,
         positions: &mut Tensor<B, 2>,

@@ -395,6 +395,10 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
 
     /// Compute forces from all force terms.
     pub fn calc_forces_and_energy(&self) -> (Tensor<B, 2>, f64) {
+        self.calc_forces_and_energy_groups(u32::MAX)
+    }
+
+    pub fn calc_forces_and_energy_groups(&self, groups: u32) -> (Tensor<B, 2>, f64) {
         let n = self.system.num_particles();
         let box_vecs = self
             .periodic_box_vectors
@@ -403,9 +407,12 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
         let mut total_energy = 0.0f64;
 
         for force in self.system.forces() {
-            let (f, e) = force.calc_forces_and_energy(&self.positions, box_vecs.as_ref());
-            total_forces = total_forces + f;
-            total_energy += e;
+            if let Some((f, e)) =
+                force.calc_forces_and_energy_groups(&self.positions, box_vecs.as_ref(), groups)
+            {
+                total_forces = total_forces + f;
+                total_energy += e;
+            }
         }
 
         self.virtual_sites.distribute_forces(
@@ -454,7 +461,8 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
 
     pub fn try_step(&mut self, steps: usize) -> Result<(), ConstraintError> {
         for _ in 0..steps {
-            let (forces, _) = self.calc_forces_and_energy();
+            let (forces, _) =
+                self.calc_forces_and_energy_groups(self.integrator.integration_force_groups());
             self.integrator.step_constrained(
                 &mut self.positions,
                 &mut self.velocities,
@@ -470,11 +478,15 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
     }
 
     pub fn get_state(&self, flags: StateFlags) -> State<B> {
+        self.get_state_groups(flags, u32::MAX)
+    }
+
+    pub fn get_state_groups(&self, flags: StateFlags, groups: u32) -> State<B> {
         let box_vecs = self
             .periodic_box_vectors
             .or_else(|| self.system.default_periodic_box_vectors().copied());
         let (forces, potential_energy) = if flags.forces || flags.energy {
-            let (f, e) = self.calc_forces_and_energy();
+            let (f, e) = self.calc_forces_and_energy_groups(groups);
             (Some(f), Some(e))
         } else {
             (None, None)
@@ -486,6 +498,9 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
                 .map(|name| (name.clone(), 0.0))
                 .collect::<HashMap<_, _>>();
             for force in self.system.forces() {
+                if groups & (1 << force.force_group()) == 0 {
+                    continue;
+                }
                 for (name, derivative) in
                     force.energy_parameter_derivatives(&self.positions, box_vecs.as_ref())
                 {

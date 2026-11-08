@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct CustomNonbondedForce {
+    metadata: super::ForceMetadata,
     energy_expr: Expression,
     per_particle_params: Vec<String>,
     paired_parameter_names: Vec<[String; 2]>,
@@ -22,8 +23,10 @@ pub struct CustomNonbondedForce {
 }
 
 impl CustomNonbondedForce {
+    super::force_metadata!();
     pub fn new(energy: &str) -> Result<Self, crate::expression::ParseError> {
         Ok(Self {
+            metadata: super::ForceMetadata::new("CustomNonbondedForce"),
             energy_expr: Expression::parse(energy)?,
             per_particle_params: Vec::new(),
             paired_parameter_names: Vec::new(),
@@ -176,6 +179,7 @@ impl CustomNonbondedForce {
 }
 
 impl<B: Backend> Force<B> for CustomNonbondedForce {
+    super::force_metadata_impl!();
     fn calc_forces_and_energy(
         &self,
         positions: &Tensor<B, 2>,

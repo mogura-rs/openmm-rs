@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct CustomBondForce {
+    metadata: super::ForceMetadata,
     /// Energy expression as a function of r and per-bond params.
     energy_expr: Expression,
     /// Names of per-bond parameters, in order.
@@ -28,9 +29,11 @@ struct BondRecord {
 }
 
 impl CustomBondForce {
+    super::force_metadata!();
     pub fn new(energy: &str) -> Result<Self, crate::expression::ParseError> {
         let expr = Expression::parse(energy)?;
         Ok(Self {
+            metadata: super::ForceMetadata::new("CustomBondForce"),
             energy_expr: expr,
             per_bond_params: Vec::new(),
             bonds: Vec::new(),
@@ -160,6 +163,7 @@ impl CustomBondForce {
 }
 
 impl<B: Backend> Force<B> for CustomBondForce {
+    super::force_metadata_impl!();
     fn calc_forces_and_energy(
         &self,
         positions: &Tensor<B, 2>,

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct CustomTorsionForce {
+    metadata: super::ForceMetadata,
     energy_expr: Expression,
     per_torsion_params: Vec<String>,
     torsions: Vec<TorsionRecord>,
@@ -28,8 +29,10 @@ struct TorsionRecord {
 }
 
 impl CustomTorsionForce {
+    super::force_metadata!();
     pub fn new(energy: &str) -> Result<Self, crate::expression::ParseError> {
         Ok(Self {
+            metadata: super::ForceMetadata::new("CustomTorsionForce"),
             energy_expr: Expression::parse(energy)?,
             per_torsion_params: Vec::new(),
             torsions: Vec::new(),
@@ -178,6 +181,7 @@ impl CustomTorsionForce {
 }
 
 impl<B: Backend> Force<B> for CustomTorsionForce {
+    super::force_metadata_impl!();
     fn calc_forces_and_energy(
         &self,
         positions: &Tensor<B, 2>,

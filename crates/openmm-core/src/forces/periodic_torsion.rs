@@ -37,13 +37,17 @@ impl TorsionParam {
 
 #[derive(Clone)]
 pub struct PeriodicTorsionForce {
+    metadata: super::ForceMetadata,
     torsions: Vec<TorsionParam>,
     use_pbc: bool,
 }
 
 impl PeriodicTorsionForce {
+    super::force_metadata!();
     pub fn new() -> Self {
         Self {
+            metadata: super::ForceMetadata::new("PeriodicTorsionForce"),
+
             torsions: Vec::new(),
             use_pbc: false,
         }
@@ -92,6 +96,7 @@ impl Default for PeriodicTorsionForce {
 }
 
 impl<B: Backend> Force<B> for PeriodicTorsionForce {
+    super::force_metadata_impl!();
     fn calc_forces_and_energy(
         &self,
         positions: &Tensor<B, 2>,
