@@ -10,6 +10,9 @@ pub(super) struct CustomEvaluator<'a> {
 }
 
 impl<'a> CustomEvaluator<'a> {
+    pub fn set_periodic_box(&mut self, vectors: Option<&[[f64; 3]; 3]>) {
+        self.workspace.set_periodic_box(vectors);
+    }
     pub fn new(
         expression: &'a Expression,
         globals: &HashMap<String, f64>,
@@ -58,6 +61,12 @@ impl<'a> CustomEvaluator<'a> {
     #[inline]
     pub fn set_coordinates(&mut self, values: &[f64]) {
         for (&index, &value) in self.coordinates.iter().zip(values) {
+            self.workspace.set(index, value);
+        }
+    }
+
+    pub fn set_coordinate_values(&mut self, values: impl IntoIterator<Item = f64>) {
+        for (&index, value) in self.coordinates.iter().zip(values) {
             self.workspace.set(index, value);
         }
     }

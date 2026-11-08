@@ -3,6 +3,34 @@
 use crate::tabulated::TabulatedFunction;
 use std::collections::HashMap;
 use std::fmt;
+mod geometry;
+use geometry::GeometryFunction;
+
+#[derive(Debug, Clone, Copy)]
+enum FunctionBinding {
+    Table(usize),
+    Geometry(GeometryFunction),
+}
+
+#[derive(Clone, Copy, Default)]
+enum GeometryMode {
+    #[default]
+    None,
+    External,
+    Particles(char, usize),
+}
+
+impl GeometryMode {
+    fn function(self, name: &str) -> Option<GeometryFunction> {
+        match self {
+            Self::External if name == "periodicdistance" => Some(GeometryFunction::Distance),
+            Self::Particles(_, _) if name != "periodicdistance" => {
+                GeometryFunction::from_name(name)
+            }
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Expression {
@@ -10,7 +38,7 @@ pub struct Expression {
     pub variables: Vec<String>,
     function_names: Vec<String>,
     function_calls: Vec<FunctionCall>,
-    function_bindings: Vec<Option<usize>>,
+    function_bindings: Vec<Option<FunctionBinding>>,
     tables: Vec<(String, TabulatedFunction)>,
 }
 
@@ -21,10 +49,14 @@ pub struct Workspace {
     adjoints: Vec<f64>,
     gradients: Vec<f64>,
     differentiable: Vec<bool>,
-    function_derivatives: Vec<[f64; 3]>,
+    function_derivatives: Vec<f64>,
+    periodic_box: Option<[[f64; 3]; 3]>,
 }
 
 impl Workspace {
+    pub fn set_periodic_box(&mut self, vectors: Option<&[[f64; 3]; 3]>) {
+        self.periodic_box = vectors.copied();
+    }
     #[inline]
     pub fn set(&mut self, index: Option<usize>, value: f64) {
         if let Some(index) = index {
@@ -40,14 +72,28 @@ impl Workspace {
 
 impl Expression {
     pub fn parse(src: &str) -> Result<Self, ParseError> {
-        Self::parse_impl(src, false)
+        Self::parse_impl(src, false, GeometryMode::None)
     }
 
     pub fn parse_unbound(src: &str) -> Result<Self, ParseError> {
-        Self::parse_impl(src, true)
+        Self::parse_impl(src, true, GeometryMode::None)
     }
 
-    fn parse_impl(src: &str, allow_unbound: bool) -> Result<Self, ParseError> {
+    pub fn parse_geometric(
+        src: &str,
+        particles: Option<(char, usize)>,
+    ) -> Result<Self, ParseError> {
+        let mode = particles.map_or(GeometryMode::External, |(prefix, count)| {
+            GeometryMode::Particles(prefix, count)
+        });
+        Self::parse_impl(src, particles.is_some(), mode)
+    }
+
+    fn parse_impl(
+        src: &str,
+        allow_unbound: bool,
+        geometry: GeometryMode,
+    ) -> Result<Self, ParseError> {
         let parts: Vec<_> = src.split(';').collect();
         let mut definitions = HashMap::new();
         for definition in parts[1..].iter().rev().filter(|s| !s.trim().is_empty()) {
@@ -60,10 +106,10 @@ impl Expression {
             }
             definitions.insert(
                 name.to_owned(),
-                parse_tree(value, &definitions, allow_unbound)?,
+                parse_tree(value, &definitions, allow_unbound, geometry)?,
             );
         }
-        let root = optimize(parse_tree(parts[0], &definitions, allow_unbound)?);
+        let root = optimize(parse_tree(parts[0], &definitions, allow_unbound, geometry)?);
         let mut variables = Vec::new();
         collect_vars(&root, &mut variables);
         variables.sort();
@@ -79,10 +125,18 @@ impl Expression {
             &mut instructions,
             &mut HashMap::new(),
         );
+        let mut offset = 0;
+        for call in &mut function_calls {
+            call.derivative_offset = offset;
+            offset += call.arguments.len();
+        }
         Ok(Self {
             instructions,
             variables,
-            function_bindings: vec![None; function_names.len()],
+            function_bindings: function_names
+                .iter()
+                .map(|name| geometry.function(name).map(FunctionBinding::Geometry))
+                .collect(),
             function_names,
             function_calls,
             tables: Vec::new(),
@@ -114,7 +168,7 @@ impl Expression {
                     )));
                 }
             }
-            self.function_bindings[binding] = Some(self.tables.len());
+            self.function_bindings[binding] = Some(FunctionBinding::Table(self.tables.len()));
         }
         self.tables.push((name.to_owned(), function));
         Ok(self.tables.len() - 1)
@@ -225,7 +279,14 @@ impl Expression {
             adjoints: vec![0.0; self.instructions.len()],
             gradients: vec![0.0; self.variables.len()],
             differentiable,
-            function_derivatives: vec![[0.0; 3]; self.function_calls.len()],
+            function_derivatives: vec![
+                0.0;
+                self.function_calls
+                    .iter()
+                    .map(|call| call.arguments.len())
+                    .sum()
+            ],
+            periodic_box: None,
         }
     }
 
@@ -247,16 +308,30 @@ impl Expression {
             workspace.values[index] = match *instruction {
                 Instruction::Function(call) => {
                     let function_call = &self.function_calls[call];
-                    let function = &self.tables[self.function_bindings[function_call.binding]
-                        .expect("unbound tabulated function")]
-                    .1;
-                    let mut arguments = [0.0; 3];
+                    let mut arguments = [0.0; 12];
                     for (i, &arg) in function_call.arguments.iter().enumerate() {
                         arguments[i] = workspace.values[arg];
                     }
-                    let (value, gradient) = function.evaluate(arguments);
-                    workspace.function_derivatives[call] = gradient;
-                    value
+                    let offset = function_call.derivative_offset;
+                    let count = function_call.arguments.len();
+                    let derivatives = &mut workspace.function_derivatives[offset..offset + count];
+                    match self.function_bindings[function_call.binding].expect("unbound function") {
+                        FunctionBinding::Table(index) => {
+                            let (value, gradient) = self.tables[index].1.evaluate([
+                                arguments[0],
+                                arguments[1],
+                                arguments[2],
+                            ]);
+                            derivatives.copy_from_slice(&gradient[..count]);
+                            value
+                        }
+                        FunctionBinding::Geometry(function) => {
+                            let (value, gradient) = function
+                                .evaluate(&arguments[..count], workspace.periodic_box.as_ref());
+                            derivatives.copy_from_slice(&gradient[..count]);
+                            value
+                        }
+                    }
                 }
                 Instruction::Literal(bits) => f64::from_bits(bits),
                 Instruction::Variable(input) => workspace.inputs[input],
@@ -286,7 +361,8 @@ impl Expression {
                 }
                 Instruction::Function(call) => {
                     for (i, &arg) in self.function_calls[call].arguments.iter().enumerate() {
-                        let derivative = workspace.function_derivatives[call][i];
+                        let derivative = workspace.function_derivatives
+                            [self.function_calls[call].derivative_offset + i];
                         if workspace.differentiable[arg] && derivative != 0.0 {
                             workspace.adjoints[arg] += adjoint * derivative;
                         }
@@ -342,6 +418,7 @@ enum Instruction {
 struct FunctionCall {
     binding: usize,
     arguments: Vec<usize>,
+    derivative_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -700,7 +777,11 @@ fn compile(
                     )
                 })
                 .collect();
-            let call = FunctionCall { binding, arguments };
+            let call = FunctionCall {
+                binding,
+                arguments,
+                derivative_offset: 0,
+            };
             let index = function_calls
                 .iter()
                 .position(|existing| existing == &call)
@@ -801,12 +882,14 @@ fn parse_tree(
     src: &str,
     definitions: &HashMap<String, Expr>,
     allow_unbound: bool,
+    geometry: GeometryMode,
 ) -> Result<Expr, ParseError> {
     let mut parser = Parser {
         tokens: tokenize(src)?,
         position: 0,
         definitions,
         allow_unbound,
+        geometry,
     };
     let result = parser.expression(0)?;
     if parser.position != parser.tokens.len() {
@@ -820,6 +903,7 @@ struct Parser<'a> {
     position: usize,
     definitions: &'a HashMap<String, Expr>,
     allow_unbound: bool,
+    geometry: GeometryMode,
 }
 impl Parser<'_> {
     fn expression(&mut self, precedence: u8) -> Result<Expr, ParseError> {
@@ -863,15 +947,72 @@ impl Parser<'_> {
                             Expr::Operation(op, args)
                         }
                         Err(error) => {
-                            if !self.allow_unbound {
-                                return Err(error);
+                            if let Some(function) = self.geometry.function(&name) {
+                                if args.len() != function.arity() {
+                                    return Err(ParseError::new(&format!(
+                                        "{name} requires {} arguments",
+                                        function.arity()
+                                    )));
+                                }
+                                Expr::Function(name, args)
+                            } else if let GeometryMode::Particles(prefix, count) = self.geometry {
+                                if matches!(name.as_str(), "distance" | "angle" | "dihedral") {
+                                    let expected = match name.as_str() {
+                                        "distance" => 2,
+                                        "angle" => 3,
+                                        _ => 4,
+                                    };
+                                    if args.len() != expected {
+                                        return Err(ParseError::new(&format!(
+                                            "{name} requires {expected} particles"
+                                        )));
+                                    }
+                                    let mut coordinates = Vec::with_capacity(3 * expected);
+                                    for arg in args {
+                                        let Expr::Variable(symbol) = arg else {
+                                            return Err(ParseError::new(
+                                                "geometric arguments must be particle identifiers",
+                                            ));
+                                        };
+                                        let index = symbol
+                                            .strip_prefix(prefix)
+                                            .and_then(|s| s.parse::<usize>().ok())
+                                            .filter(|&index| {
+                                                index >= 1
+                                                    && index <= count
+                                                    && symbol == format!("{prefix}{index}")
+                                            })
+                                            .ok_or_else(|| {
+                                                ParseError::new(&format!(
+                                                    "unknown particle: {symbol}"
+                                                ))
+                                            })?;
+                                        coordinates.extend(
+                                            ['x', 'y', 'z'].map(|axis| {
+                                                Expr::Variable(format!("{axis}{index}"))
+                                            }),
+                                        );
+                                    }
+                                    Expr::Function(format!("point{name}"), coordinates)
+                                } else {
+                                    if !(1..=3).contains(&args.len()) {
+                                        return Err(ParseError::new(
+                                            "tabulated functions require 1-3 arguments",
+                                        ));
+                                    }
+                                    Expr::Function(name, args)
+                                }
+                            } else {
+                                if !self.allow_unbound {
+                                    return Err(error);
+                                }
+                                if !(1..=3).contains(&args.len()) {
+                                    return Err(ParseError::new(
+                                        "tabulated functions require 1-3 arguments",
+                                    ));
+                                }
+                                Expr::Function(name, args)
                             }
-                            if !(1..=3).contains(&args.len()) {
-                                return Err(ParseError::new(
-                                    "tabulated functions require 1-3 arguments",
-                                ));
-                            }
-                            Expr::Function(name, args)
                         }
                     }
                 } else {

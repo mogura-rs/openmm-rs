@@ -1,6 +1,7 @@
 pub mod cmap_torsion;
 pub mod custom_angle;
 pub mod custom_bond;
+pub mod custom_compound;
 mod custom_evaluator;
 pub mod custom_external;
 pub mod custom_nonbonded;

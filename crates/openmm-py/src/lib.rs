@@ -1,3 +1,5 @@
+mod custom_compound;
+use custom_compound::PyCustomCompoundBondForce;
 // Thin pyo3 wrapper. All simulation logic lives in openmm-core.
 // Backend is fixed to NdArray (CPU) at the Python boundary.
 mod cmap_torsion;
@@ -689,6 +691,14 @@ impl PyCustomExternalForce {
 
 #[pymethods]
 impl PyCustomExternalForce {
+    fn get_energy_function(&self) -> &str {
+        self.inner.energy_function()
+    }
+    fn set_energy_function(&mut self, energy: &str) -> PyResult<()> {
+        self.inner
+            .set_energy_function(energy)
+            .map_err(|e| err(&e.to_string()))
+    }
     fn get_force_group(&self) -> u32 {
         self.inner.force_group()
     }
@@ -1905,6 +1915,9 @@ impl PySystem {
     }
 
     fn add_force(&mut self, force: &Bound<'_, PyAny>) -> PyResult<usize> {
+        if let Ok(force) = force.extract::<PyRef<'_, PyCustomCompoundBondForce>>() {
+            return Ok(self.inner_mut().add_force(Box::new(force.snapshot())));
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyCMAPTorsionForce>>() {
             return Ok(self.inner_mut().add_force(Box::new(force.inner.clone())));
         }
@@ -2129,6 +2142,11 @@ impl PyContext {
         force_index: usize,
         force: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        if let Ok(force) = force.extract::<PyRef<'_, PyCustomCompoundBondForce>>() {
+            self.inner
+                .update_custom_compound_force_parameters(force_index, &force.snapshot());
+            return Ok(());
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyCMAPTorsionForce>>() {
             self.inner
                 .update_cmap_torsion_force_parameters(force_index, &force.inner);
@@ -2244,6 +2262,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNonbondedForce>()?;
     m.add_class::<PyCustomExternalForce>()?;
     m.add_class::<PyCustomBondForce>()?;
+    m.add_class::<PyCustomCompoundBondForce>()?;
     m.add_class::<PyCustomAngleForce>()?;
     m.add_class::<PyCustomNonbondedForce>()?;
     m.add_class::<PyCMAPTorsionForce>()?;

@@ -49,7 +49,7 @@ revision in generated validation results.
 | Bonded forces | Partial | Harmonic bonds/angles, periodic/RB torsions and CMAP have analytic forces and reference comparisons; broader API validation and GPU execution remain |
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
-| Custom forces | Partial | Five force types use compiled scalar expressions, shared subexpressions and analytic coordinate/parameter derivatives; six tabulated function types are available for CustomNonbondedForce; geometric functions, other force types and broader API coverage remain |
+| Custom forces | Partial | Six force types use compiled expressions and analytic derivatives; CustomNonbondedForce and CustomCompoundBondForce support six table types; periodic external distances and compound geometric functions are implemented; other force types and broader API coverage remain |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | Thin CPU wrappers exist, but the interface is not yet OpenMM-compatible |
@@ -63,7 +63,10 @@ integrator configurations at four time points, forty-one nonbonded configuration
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
 wrapping configurations, six minimization configurations and 184 custom-expression
-states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states and 384 custom-nonbonded states.
+states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states and 864 geometric-expression states.
+Geometric fixtures cover external periodic distances, compound distance/angle/dihedral
+functions, explicit point functions, shared particles, triclinic boxes, nested
+functions, table and bond updates, global parameters, groups and short trajectories.
 Custom nonbonded fixtures cover all three methods, switching, overlapping and
 empty interaction groups, computed values, table updates, global changes, box
 changes and long-range corrections. Pair forces and energies use strict double
@@ -115,8 +118,13 @@ Computed values cannot be combined with registered parameter derivatives, matchi
 the reference. Runtime parameter updates retain the Context's exclusions, groups,
 method and cutoff settings. Setting the cutoff distance alone no longer enables a
 cutoff; select `CutoffNonPeriodic` or `CutoffPeriodic` explicitly.
-Geometry functions such as `periodicdistance`
-are not yet supported. A constant NaN in an unselected branch can prevent the
+CustomCompoundBondForce supports particle coordinates, distance/angle/dihedral
+functions, explicit point functions, tables and registered parameter derivatives.
+CustomExternalForce supports `periodicdistance` with coordinate chain rules.
+Geometric angle derivatives retain the reference cross-product norm floor of
+`1e-6`; this regularizes nearly collinear angles and differs from the exact energy
+gradient below that threshold. Coincident-point distance derivatives are zero.
+A constant NaN in an unselected branch can prevent the
 supplied Lepton optimizer from terminating because NaN is unequal to itself.
 Reference fixtures therefore use defined scalar domains; Rust separately checks
 that unselected branches do not contaminate derivatives.

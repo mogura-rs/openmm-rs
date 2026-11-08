@@ -6,6 +6,7 @@ use crate::constraints::{ConstraintError, ConstraintSolver};
 use crate::forces::cmap_torsion::CMAPTorsionForce;
 use crate::forces::custom_angle::CustomAngleForce;
 use crate::forces::custom_bond::CustomBondForce;
+use crate::forces::custom_compound::CustomCompoundBondForce;
 use crate::forces::custom_external::CustomExternalForce;
 use crate::forces::custom_nonbonded::CustomNonbondedForce;
 use crate::forces::custom_torsion::CustomTorsionForce;
@@ -258,6 +259,25 @@ impl<B: Backend> Context<B> {
             .as_any_mut()
             .downcast_mut::<CustomBondForce>()
             .unwrap_or_else(|| panic!("force at index {force_index} is not a CustomBondForce"));
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_custom_compound_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &CustomCompoundBondForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<CustomCompoundBondForce>()
+            .unwrap_or_else(|| {
+                panic!("force at index {force_index} is not a CustomCompoundBondForce")
+            });
         target.update_parameters_from(source);
     }
 

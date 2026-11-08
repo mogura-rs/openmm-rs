@@ -10,6 +10,7 @@ use std::collections::HashMap;
 pub struct CustomExternalForce {
     metadata: super::ForceMetadata,
     energy_expr: Expression,
+    energy_source: String,
     per_particle_params: Vec<String>,
     particles: Vec<ParticleRecord>,
     global_param_names: Vec<String>,
@@ -28,7 +29,8 @@ impl CustomExternalForce {
     pub fn new(energy: &str) -> Result<Self, crate::expression::ParseError> {
         Ok(Self {
             metadata: super::ForceMetadata::new("CustomExternalForce"),
-            energy_expr: Expression::parse(energy)?,
+            energy_expr: Expression::parse_geometric(energy, None)?,
+            energy_source: energy.to_owned(),
             per_particle_params: Vec::new(),
             particles: Vec::new(),
             global_param_names: Vec::new(),
@@ -40,6 +42,20 @@ impl CustomExternalForce {
     pub fn add_per_particle_parameter(&mut self, name: &str) -> usize {
         self.per_particle_params.push(name.to_string());
         self.per_particle_params.len() - 1
+    }
+
+    pub fn energy_function(&self) -> &str {
+        &self.energy_source
+    }
+
+    pub fn set_energy_function(
+        &mut self,
+        energy: &str,
+    ) -> Result<(), crate::expression::ParseError> {
+        let expression = Expression::parse_geometric(energy, None)?;
+        self.energy_expr = expression;
+        self.energy_source = energy.to_owned();
+        Ok(())
     }
 
     pub fn num_per_particle_parameters(&self) -> usize {
@@ -123,7 +139,7 @@ impl CustomExternalForce {
     }
 
     pub fn uses_periodic_boundary_conditions(&self) -> bool {
-        false
+        self.energy_source.contains("periodicdistance")
     }
 
     pub fn update_parameters_from(&mut self, source: &Self) {
@@ -163,6 +179,7 @@ impl CustomExternalForce {
             &["x", "y", "z"],
             &self.energy_param_deriv_names,
         );
+        evaluator.set_periodic_box(_box_vectors);
 
         for rec in &self.particles {
             let i = rec.index;
@@ -213,7 +230,7 @@ impl<B: Backend> Force<B> for CustomExternalForce {
     }
 
     fn uses_periodic_boundary_conditions(&self) -> bool {
-        false
+        self.uses_periodic_boundary_conditions()
     }
 
     fn global_parameters(&self) -> HashMap<String, f64> {

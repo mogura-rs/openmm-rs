@@ -44,3 +44,5 @@ pub use integrators::brownian::BrownianIntegrator;
 pub use integrators::langevin::LangevinMiddleIntegrator;
 pub use integrators::verlet::VerletIntegrator;
 pub use integrators::Integrator;
+
+pub use forces::custom_compound::CustomCompoundBondForce;
