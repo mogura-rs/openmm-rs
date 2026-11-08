@@ -24,6 +24,11 @@ def main():
             assert abs(record["kinetic_energy"]-expected) < tolerance, record
         if record.get("barostat"):
             assert record["volume"] > 0 and abs(record["volume"]-record["expected_volume"]) < 6*record["volume_stddev"], record
+        if "box_diagonal" in record:
+            a,b,c=record["box_diagonal"]
+            bx,cx,cy=record["box_tilt"]
+            assert all(math.isfinite(value) for value in [a,b,c,bx,cx,cy]),record
+            assert min(a,b,c)>0 and a>=2*abs(bx) and a>=2*abs(cx) and b>=2*abs(cy),record
         memory_path = path.with_suffix(".memory.txt")
         for line in memory_path.read_text().splitlines():
             if "Maximum resident set size (kbytes):" in line:
@@ -59,11 +64,13 @@ def main():
         kinds = {record.get("barostat_kind", "isotropic") for rows in groups.values() for record in rows}
         assert len(kinds) == 1, kinds
         kind = next(iter(kinds))
-        mode = {"isotropic": "isotropic", "anisotropic": "single-axis anisotropic", "membrane": "XY-isotropic membrane"}[kind]
+        mode = {"isotropic": "isotropic", "anisotropic": "single-axis anisotropic", "membrane": "XY-isotropic membrane", "flexible": "fully flexible box"}[kind]
         settings = "20 bar and 300 K"
         if kind == "membrane":
             settings = "20 bar, 7 bar nm surface tension, 300 K and fixed Z=3 nm"
         note = f"Matched f64 {mode} volume moves every Verlet step at {settings}, with 100 warmup steps. Zero-strength bonds define diatomic molecules; integration force groups exclude potential forces. Initial volume is the ideal-gas mean; the final volume must remain within six equilibrium standard deviations. Random paths differ. This measures coordinate-scaling and Context overhead, not force-field throughput or equilibrium convergence. Optimized CPU/GPU platforms are not measured."
+    if all(record.get("barostat_kind") == "flexible" for rows in groups.values() for record in rows):
+        note += " Box shapes are unrestrained; this short timing run does not establish an equilibrium shape distribution."
     result = {"note": note, "cases": groups, "summary": summaries}
     (directory / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))

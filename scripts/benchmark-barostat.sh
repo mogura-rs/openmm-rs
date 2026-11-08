@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 reference_source="${OPENMM_SOURCE:-../openmm}"
 kind="${1:-isotropic}"
-case "$kind" in isotropic|anisotropic|membrane) ;; *) echo "Unknown barostat kind: $kind" >&2; exit 2 ;; esac
+case "$kind" in isotropic|anisotropic|membrane|flexible) ;; *) echo "Unknown barostat kind: $kind" >&2; exit 2 ;; esac
 reference_build=target/reference-openmm
 export CARGO_TARGET_DIR=target/benchmark-rust
 jobs="${SLURM_CPUS_PER_TASK:-4}"

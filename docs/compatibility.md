@@ -52,7 +52,7 @@ revision in generated validation results.
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
-| State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; isotropic, anisotropic and membrane Monte Carlo pressure control are implemented; the flexible barostat remains |
+| State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; all four Monte Carlo barostats have CPU implementations and reference fixtures; broader molecular NPT stability and GPU execution remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; integrator settings are shared with the bound Context; broader names/signatures, units and platform selection remain incomplete |
 | Precision | Partial | CPU core supports f32 and f64; Python uses f64. GPU precision modes remain unverified |
@@ -134,6 +134,26 @@ volume Jacobian are zero. XY and Z mode changes take effect in existing Contexts
 like frequency changes. The pressure query reports three Cartesian components,
 independently of these shape permissions, and uses the same triclinic correction.
 
+MonteCarloFlexibleBarostat perturbs the six independent box-matrix entries,
+flips negative diagonals and reduces the resulting lattice by integer basis
+changes. Coordinate scaling uses the three diagonal length ratios, matching the
+reference proposal. Its acceptance work includes the reference measure terms
+`-(Nscaled-2)*kT*log(Vnew/Vold)` and
+`-kT*log(ax_new^2*by_new/(ax_old^2*by_old))`, in addition to energy and pressure work.
+The common proposal length starts at one percent of the cube root of volume.
+The adaptive upper limit uses the proposed volume, including rejected moves.
+
+The flexible class exposes two different six-component queries, ordered
+`XX, YY, ZZ, XY, XZ, YZ`. `computeCurrentPressure` preserves the source API's
+fractional change to one box-matrix entry at a time; diagonal probes also scale
+that coordinate component, while off-diagonal probes leave coordinates fixed.
+A zero off-diagonal entry therefore gives zero potential contribution to its
+corresponding pressure component. `computeStressTensor` instead applies the same
+Cartesian strain to coordinates and all box vectors. It returns tension-positive
+stress and optionally includes the raw molecular/atomic kinetic tensor. The
+kinetic option defaults to false. Both queries reduce trial box vectors and
+preserve the original state. Shared pressure helpers are in `context/pressure.rs`.
+
 State updates run in System order, independently of force-group masks. Barostat
 energies use the integrator's selected force groups, including separate reciprocal
 PME groups. Its schedule uses an internal counter rather than the Context step
@@ -194,6 +214,23 @@ All runs discard 10,000 steps and use forty blocks of 5,000 steps, with samples
 every twenty steps. The pressure difference stays below 2.02e-11 bar. Rust tests
 also check the sign of surface-tension work, pressure-independent constant-volume
 paths, selected energy groups, f32 geometry and dense-storage reuse.
+
+Flexible-cell fixtures compare 972 states for both pressure/stress APIs and the
+kinetic-stress option, including orthorhombic cells, triclinic cells and probes
+that cross a reduced-cell boundary. They also cover 60 frequency schedules and
+two confined-box sampling runs. A box potential cancels the imposed pressure
+and adds linear diagonal terms plus harmonic tilt terms. In the regime where
+tilts stay far from reduction boundaries, the diagonal lengths have gamma shapes
+`Nscaled+1`, `Nscaled` and `Nscaled-1`, while the three tilts have zero-mean Gaussian
+distributions. First and second moments are checked within six block standard
+errors using the same 10,000-step warmup and forty-block protocol. The largest
+pressure, configurational-stress and total-stress differences were respectively
+2.08e-11, 2.56e-12 and 2.02e-11 bar. Rust regressions independently check a tilted
+harmonic bond's analytic virial, raw kinetic cross terms, lattice equivalence after
+reduction, one/two-molecule Jacobians, f32 scaling and dense-buffer reuse. The
+six-atom Lennard-Jones stress is also compared with the LAMMPS numbers stored in
+the supplied OpenMM tests; LAMMPS itself is not run by this suite.
+
 
 
 
@@ -537,6 +574,26 @@ These cases retain the reused proposal storage. The benchmark measures coordinat
 and Context overhead with potential forces excluded; it does not establish lipid
 bilayer equilibration or molecular force-field throughput.
 
+Passing `flexible` to the same benchmark permits all six box entries to change.
+It uses the existing pressure, temperature, warmup, sizes and step counts. The
+output also records box diagonals and tilts and verifies that the cell stays
+finite and reduced.
+
+| Scaling | Atoms | Rust median steps/s | Reference median steps/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Rigid | 512 | 152,121 | 42,315 | 4,196 | 7,264 |
+| Rigid | 4,096 | 20,961 | 5,039 | 5,128 | 8,644 |
+| Rigid | 65,536 | 1,342 | 312 | 23,872 | 29,908 |
+| Atomic | 512 | 194,623 | 41,466 | 4,176 | 7,480 |
+| Atomic | 4,096 | 27,381 | 5,095 | 5,096 | 8,512 |
+| Atomic | 65,536 | 1,887 | 314 | 21,016 | 31,248 |
+
+These unrestrained fluid cells can develop large aspect ratios: at 512 atoms,
+the final maximum/minimum diagonal ratios were about 11 and 22 in Rust and
+7 and 5 in Reference for rigid and atomic scaling. Their random paths differ.
+The finite timing runs verify coordinate-update throughput and a broad final-volume
+bound, not equilibrium cell shape. Confined-shape statistics are tested separately.
+
 ## Validation and optimization rules
 
 Numerical comparisons use the supplied reference implementation, matching system,
@@ -613,7 +670,7 @@ Small-system overhead remains optimization work.
 
 ## Documentation discrepancies found during implementation
 
-- The isotropic, anisotropic and membrane barostat constructor comments call the rigid scaling center a
+- All four Monte Carlo barostat constructor comments call the rigid scaling center a
   center of mass. The Reference kernel instead uses the unweighted centroid,
   consistent with their getter/setter documentation. Rust follows the code.
 - The membrane barostat surface-tension setter describes its argument as bar,

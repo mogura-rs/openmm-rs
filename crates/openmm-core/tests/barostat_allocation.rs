@@ -1,8 +1,8 @@
 use burn::{backend::NdArray, tensor::TensorData};
 use openmm_core::{
     Context, Force, HarmonicBondForce, MembraneXYMode, MembraneZMode,
-    MonteCarloAnisotropicBarostat, MonteCarloBarostat, MonteCarloMembraneBarostat, StateFlags,
-    System, VerletIntegrator,
+    MonteCarloAnisotropicBarostat, MonteCarloBarostat, MonteCarloFlexibleBarostat,
+    MonteCarloMembraneBarostat, StateFlags, System, VerletIntegrator,
 };
 use std::alloc::{GlobalAlloc, Layout, System as SystemAllocator};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,6 +38,8 @@ fn volume_moves_reuse_dense_storage_and_preserve_snapshots() {
         (true, 1),
         (false, 2),
         (true, 2),
+        (false, 3),
+        (true, 3),
     ] {
         let mut system = System::<NdArray<f64>>::new();
         for _ in 0..PARTICLES {
@@ -52,7 +54,12 @@ fn volume_moves_reuse_dense_storage_and_preserve_snapshots() {
         let mut barostat = MonteCarloBarostat::new(1.0, 300.0, 1);
         barostat.set_scale_molecules_as_rigid(rigid);
         barostat.set_random_number_seed(47);
-        if kind == 2 {
+        if kind == 3 {
+            let mut barostat = MonteCarloFlexibleBarostat::new(1.0, 300.0, 1);
+            barostat.set_scale_molecules_as_rigid(rigid);
+            barostat.set_random_number_seed(47);
+            system.add_force(Box::new(barostat));
+        } else if kind == 2 {
             let mut barostat = MonteCarloMembraneBarostat::new(
                 1.0,
                 0.0,

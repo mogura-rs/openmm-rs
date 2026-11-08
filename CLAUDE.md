@@ -154,7 +154,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - RMSD, radius of gyration and orientation restraint — quaternion alignment and analytic forces
 - CustomCVForce — nested force composition and analytic chain-rule derivatives
 - CMMotionRemover and AndersenThermostat — ordered velocity updates, constraint-group collisions and runtime thermostat parameters
-- MonteCarloBarostat, MonteCarloAnisotropicBarostat and MonteCarloMembraneBarostat — isotropic, axis-selected or membrane volume/shape moves, molecular/atomic scaling, live settings and instantaneous pressure
+- All four Monte Carlo barostats — isotropic, anisotropic, membrane and flexible cells, molecular/atomic scaling, live settings, instantaneous pressure and strain stress
 - Python wrappers — partial snake_case CPU interface with retained force definitions, Context snapshots, single-owner checks and shared runtime integrator settings
 
 ### Next

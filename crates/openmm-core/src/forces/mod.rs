@@ -16,6 +16,7 @@ pub mod custom_nonbonded;
 pub mod custom_torsion;
 pub mod custom_volume;
 mod ewald;
+pub mod flexible_barostat;
 pub mod harmonic_angle;
 pub mod harmonic_bond;
 pub mod membrane_barostat;
