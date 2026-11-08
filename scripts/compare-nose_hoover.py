@@ -233,6 +233,24 @@ def main():
     rows = [row for row in rows if "probe" not in row]
     probe = raw_probes["raw_pair_only"]
     assert raw_probes["relative_only"]["velocities"] == [[1, 0, 0], [-1, 0, 0]]
+    corrected_system = om.System()
+    for _ in range(2):
+        corrected_system.add_particle(1)
+    corrected_integrator = om.NoseHooverIntegrator(0.001)
+    corrected_integrator.addSubsystemThermostat([], [(0, 1)], 300, 1, 300, 1, 1, 1, 1)
+    corrected_context = om.Context(corrected_system, corrected_integrator)
+    corrected_context.set_positions([(0, 0, 0), (1, 0, 0)])
+    corrected_context.set_velocities([(1, 0, 0), (-1, 0, 0)])
+    corrected_integrator.step(1)
+    corrected_velocity = corrected_context.get_state(velocities=True).velocities
+    kt = 1.380649e-23*6.02214076e23/1000*300
+    bath_half = 0.0005*(2-3*kt)/(3*kt)
+    scale = math.exp(-0.001*bath_half)
+    assert scale != 1 and math.isclose(corrected_velocity[0][0], scale, abs_tol=1e-15)
+    assert math.isclose(corrected_velocity[1][0], -scale, abs_tol=1e-15)
+    bath_velocity = bath_half+0.0005*(2*scale*scale-3*kt)/(3*kt)
+    expected_bath = 0.5*(3*kt)*bath_velocity*bath_velocity+(3*kt)*0.001*bath_half
+    assert math.isclose(corrected_integrator.computeHeatBathEnergy(), expected_bath, rel_tol=1e-12, abs_tol=1e-18)
     assert not raw_probes["zero_radial_wall"]["finite"]
     assert probe['probe'] == 'raw_pair_only' and probe['initial_reported'] == 1 and probe['final_reported'] == 0
     assert abs(sum(v[0] for v in probe['velocities'])) < 1e-15

@@ -239,3 +239,32 @@ fn zero_radial_speed_hard_wall_uses_finite_momentum_preserving_reflection() {
     assert_relative_eq!(v[0] + 2. * v[3], 0., epsilon = 1e-15);
     assert_relative_eq!(p[0] + 2. * p[3], 2., epsilon = 1e-15);
 }
+
+#[test]
+fn relative_chain_propagates_independently_when_pair_com_is_zero() {
+    let mut s = System::<B>::new();
+    s.add_particle(1.);
+    s.add_particle(1.);
+    let mut i = NoseHooverIntegrator::new(0.001);
+    i.add_subsystem_thermostat(vec![], vec![(0, 1)], 300., 1., 300., 1., 1, 1, 1)
+        .unwrap();
+    i.initialize_system(&s);
+    let mass = from_floats::<B, 1>(TensorData::new(vec![1., 1.], [2]), &Default::default());
+    let mut p = coordinates::<B>(vec![0., 0., 0., 1., 0., 0.]);
+    let mut v = coordinates::<B>(vec![1., 0., 0., -1., 0., 0.]);
+    let f = coordinates::<B>(vec![0.; 6]);
+    i.step(&mut p, &mut v, &f, &mass);
+    let kt = openmm_core::integrators::langevin::BOLTZMANN * 300.;
+    let q = 3. * kt;
+    let half_bath_velocity = 0.0005 * (2. - 3. * kt) / q;
+    let scale = (-0.001 * half_bath_velocity).exp();
+    let bath_velocity = half_bath_velocity + 0.0005 * (2. * scale * scale - 3. * kt) / q;
+    let expected_bath =
+        0.5 * q * bath_velocity * bath_velocity + 3. * kt * 0.001 * half_bath_velocity;
+    let actual = data(&v);
+    assert_relative_eq!(actual[0], scale, epsilon = 1e-15);
+    assert_relative_eq!(actual[3], -scale, epsilon = 1e-15);
+    assert!(scale != 1.);
+    assert_relative_eq!(actual[0] + actual[3], 0., epsilon = 1e-15);
+    assert_relative_eq!(i.compute_heat_bath_energy(), expected_bath, epsilon = 1e-18);
+}

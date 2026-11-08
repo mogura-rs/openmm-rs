@@ -886,7 +886,7 @@ mean kinetic energy. Reference and Rust gave the same oscillator summaries.
 These are finite oscillator checks, not a claim of convergence or stability for
 general molecular systems.
 
-### Approved pair COM and kinetic-energy exceptions
+### Approved pair thermostat and kinetic-energy exceptions
 
 The supplied Reference and Common chain kernels gate absolute propagation on the
 number of individual atoms. With pairs only and nonzero COM kinetic energy,
@@ -902,12 +902,15 @@ The source integrator reports only each thermostat's absolute masked kinetic
 energy, omitting pair relative motion and unthermostated particles. Rust reports
 one half of the mass-weighted squared velocity over all particles. Reference
 comparisons compute this same total directly from its saved velocities and record
-the source API's omitted energy separately. These two differences are intentional
-compatibility exceptions approved for physical correctness.
+the source API's omitted energy separately. These differences are intentional compatibility exceptions approved for physical
+correctness.
 
-The Reference guard for absolute masked kinetic energy below `1e-8` currently
-skips both chains, including a populated relative bath. This boundary is recorded
-by a separate source probe and is not covered by the two exceptions above.
+The Reference guard for absolute masked kinetic energy below `1e-8` skips both
+chains even when the pair has relative motion. Rust retains the absolute-chain
+guard but propagates each registered relative chain independently of absolute
+kinetic energy. This third correction is also approved. A source probe records
+the unmodified behavior, while a scalar one-bead recurrence checks the corrected
+relative velocities, heat-bath energy and conserved COM momentum.
 
 A hard-wall violation with exactly zero radial velocity makes Reference divide
 by zero. Rust instead chooses finite inward radial velocities, conserving pair
@@ -1023,8 +1026,9 @@ not establish equilibrium sampling or optimized OpenMM CPU/GPU performance.
   check only rejects negative values, allowing zero. Rust enforces positivity.
 - The Nose-Hoover pair documentation promises independent COM and relative
   thermostatting, but the source absolute-chain branch requires an individual
-  atom. Its kinetic-energy API also omits relative and unthermostated motion.
-  The approved exceptions above correct these two implementation defects.
+  atom and the low-absolute-energy guard also disables the relative chain.
+  Its kinetic-energy API omits relative and unthermostated motion. The approved
+  exceptions above correct all three implementation defects.
 
 Implementation and reference tests take precedence over outdated descriptions.
 

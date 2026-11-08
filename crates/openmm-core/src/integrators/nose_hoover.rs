@@ -498,17 +498,18 @@ impl NoseHooverIntegrator {
                 abs_ke += 0.5 * (mass[a] + mass[b]) * com2;
                 rel_ke += 0.5 * (mass[a] * mass[b] * inv_mass) * relative2;
             }
-            if abs_ke < 1e-8 {
-                continue;
-            }
-            let abs_scale = absolute.propagate(
-                abs_ke,
-                chain.num_degrees_of_freedom,
-                chain.temperature,
-                chain.collision_frequency,
-                self.dt,
-                chain,
-            );
+            let abs_scale = if abs_ke < 1e-8 {
+                1.0
+            } else {
+                absolute.propagate(
+                    abs_ke,
+                    chain.num_degrees_of_freedom,
+                    chain.temperature,
+                    chain.collision_frequency,
+                    self.dt,
+                    chain,
+                )
+            };
             let rel_scale = if chain.pairs.is_empty() {
                 1.0
             } else {
