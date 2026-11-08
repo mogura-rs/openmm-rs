@@ -2,7 +2,8 @@ use super::{err, group_mask, PyContext, B};
 use burn::prelude::*;
 use openmm_core::constraints::{ConstraintError, ConstraintSolver};
 use openmm_core::{
-    BrownianIntegrator, Context, Integrator, LangevinMiddleIntegrator, VerletIntegrator,
+    BrownianIntegrator, Context, Integrator, LangevinMiddleIntegrator, VariableLangevinIntegrator,
+    VariableVerletIntegrator, VerletIntegrator,
 };
 use pyo3::prelude::*;
 use std::{
@@ -26,6 +27,18 @@ impl ContextLink {
 
     pub(crate) fn bind(&self, context: &SharedContext) {
         *self.0.borrow_mut() = Rc::downgrade(context);
+    }
+
+    fn step_to(&self, time: f64) -> PyResult<()> {
+        let context = self
+            .0
+            .borrow()
+            .upgrade()
+            .ok_or_else(|| err("this Integrator is not bound to a Context"))?;
+        let mut core = context
+            .try_borrow_mut()
+            .map_err(|_| err("the Context is already in use"))?;
+        core.try_step_to(time).map_err(|e| err(&e.to_string()))
     }
 
     fn step(&self, steps: usize) -> PyResult<()> {
@@ -57,8 +70,25 @@ impl<T: Integrator<B>> Integrator<B> for SharedIntegrator<T> {
     fn step_size(&self) -> f64 {
         self.0.lock().unwrap().step_size()
     }
+    fn supports_step_to(&self) -> bool {
+        self.0.lock().unwrap().supports_step_to()
+    }
+    fn step_with_limit(
+        &self,
+        p: &mut Tensor<B, 2>,
+        v: &mut Tensor<B, 2>,
+        f: &Tensor<B, 2>,
+        m: &Tensor<B, 1>,
+        c: &ConstraintSolver,
+        limit: f64,
+    ) -> Result<(), ConstraintError> {
+        self.0.lock().unwrap().step_with_limit(p, v, f, m, c, limit)
+    }
     fn constraint_tolerance(&self) -> f64 {
         self.0.lock().unwrap().constraint_tolerance()
+    }
+    fn kinetic_energy_time_offset(&self) -> f64 {
+        self.0.lock().unwrap().kinetic_energy_time_offset()
     }
     fn velocity_time_offset(&self) -> f64 {
         self.0.lock().unwrap().velocity_time_offset()
@@ -145,7 +175,9 @@ macro_rules! integrator_class {
                 <$core as Integrator<B>>::step_size(&*self.inner.lock().unwrap())
             }
             fn set_step_size(&self, step_size: f64) -> PyResult<()> {
-                positive(step_size, "step size")?;
+                if <$core as Integrator<B>>::supports_step_to(&*self.inner.lock().unwrap()) {
+                    nonnegative(step_size, "step size")?;
+                } else { positive(step_size, "step size")?; }
                 self.inner.lock().unwrap().set_step_size(step_size);
                 Ok(())
             }
@@ -282,6 +314,100 @@ integrator_class!(
     }
 );
 
+integrator_class!(
+    PyVariableVerletIntegrator,
+    "VariableVerletIntegrator",
+    VariableVerletIntegrator,
+    {
+        #[new]
+        fn new(error_tolerance: f64) -> PyResult<Self> {
+            positive(error_tolerance, "error tolerance")?;
+            Ok(Self::from_core(VariableVerletIntegrator::new(
+                error_tolerance,
+            )))
+        }
+        fn step_to(&self, time: f64) -> PyResult<()> {
+            self.link.step_to(time)
+        }
+        fn get_error_tolerance(&self) -> f64 {
+            self.inner.lock().unwrap().error_tolerance()
+        }
+        fn set_error_tolerance(&self, value: f64) -> PyResult<()> {
+            positive(value, "error tolerance")?;
+            self.inner.lock().unwrap().set_error_tolerance(value);
+            Ok(())
+        }
+        fn get_maximum_step_size(&self) -> f64 {
+            self.inner.lock().unwrap().maximum_step_size()
+        }
+        fn set_maximum_step_size(&self, value: f64) -> PyResult<()> {
+            nonnegative(value, "maximum step size")?;
+            self.inner.lock().unwrap().set_maximum_step_size(value);
+            Ok(())
+        }
+    }
+);
+
+integrator_class!(
+    PyVariableLangevinIntegrator,
+    "VariableLangevinIntegrator",
+    VariableLangevinIntegrator,
+    {
+        #[new]
+        fn new(temperature: f64, friction: f64, error_tolerance: f64) -> PyResult<Self> {
+            nonnegative(temperature, "temperature")?;
+            nonnegative(friction, "friction")?;
+            positive(error_tolerance, "error tolerance")?;
+            Ok(Self::from_core(VariableLangevinIntegrator::new(
+                temperature,
+                friction,
+                error_tolerance,
+            )))
+        }
+        fn step_to(&self, time: f64) -> PyResult<()> {
+            self.link.step_to(time)
+        }
+        fn get_error_tolerance(&self) -> f64 {
+            self.inner.lock().unwrap().error_tolerance()
+        }
+        fn set_error_tolerance(&self, value: f64) -> PyResult<()> {
+            positive(value, "error tolerance")?;
+            self.inner.lock().unwrap().set_error_tolerance(value);
+            Ok(())
+        }
+        fn get_maximum_step_size(&self) -> f64 {
+            self.inner.lock().unwrap().maximum_step_size()
+        }
+        fn set_maximum_step_size(&self, value: f64) -> PyResult<()> {
+            nonnegative(value, "maximum step size")?;
+            self.inner.lock().unwrap().set_maximum_step_size(value);
+            Ok(())
+        }
+        fn get_temperature(&self) -> f64 {
+            self.inner.lock().unwrap().temperature()
+        }
+        fn set_temperature(&self, value: f64) -> PyResult<()> {
+            nonnegative(value, "temperature")?;
+            self.inner.lock().unwrap().set_temperature(value);
+            Ok(())
+        }
+        fn get_friction(&self) -> f64 {
+            self.inner.lock().unwrap().friction()
+        }
+        fn set_friction(&self, value: f64) -> PyResult<()> {
+            nonnegative(value, "friction")?;
+            self.inner.lock().unwrap().set_friction(value);
+            Ok(())
+        }
+        fn get_random_number_seed(&self) -> i32 {
+            self.inner.lock().unwrap().random_number_seed()
+        }
+        fn set_random_number_seed(&self, value: i32) {
+            self.inner.lock().unwrap().set_random_number_seed(value);
+        }
+    }
+);
+
 pub(crate) fn prepare(
     object: &Bound<'_, PyAny>,
 ) -> PyResult<(Box<dyn Integrator<B>>, ContextLink)> {
@@ -296,6 +422,8 @@ pub(crate) fn prepare(
             }
         };
     }
+    extract!(PyVariableVerletIntegrator);
+    extract!(PyVariableLangevinIntegrator);
     extract!(PyVerletIntegrator);
     extract!(PyLangevinMiddleIntegrator);
     extract!(PyBrownianIntegrator);
@@ -338,16 +466,25 @@ pub(crate) fn create_context(
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PyVariableVerletIntegrator>()?;
+    module.add_class::<PyVariableLangevinIntegrator>()?;
     module.add_class::<PyVerletIntegrator>()?;
     module.add_class::<PyLangevinMiddleIntegrator>()?;
     module.add_class::<PyLangevinIntegrator>()?;
     module.add_class::<PyBrownianIntegrator>()?;
     for class in [
+        module.py().get_type::<PyVariableVerletIntegrator>(),
+        module.py().get_type::<PyVariableLangevinIntegrator>(),
         module.py().get_type::<PyVerletIntegrator>(),
         module.py().get_type::<PyLangevinMiddleIntegrator>(),
         module.py().get_type::<PyBrownianIntegrator>(),
     ] {
         for (snake, camel) in [
+            ("step_to", "stepTo"),
+            ("get_error_tolerance", "getErrorTolerance"),
+            ("set_error_tolerance", "setErrorTolerance"),
+            ("get_maximum_step_size", "getMaximumStepSize"),
+            ("set_maximum_step_size", "setMaximumStepSize"),
             ("get_step_size", "getStepSize"),
             ("get_random_number_seed", "getRandomNumberSeed"),
             ("set_random_number_seed", "setRandomNumberSeed"),

@@ -51,7 +51,7 @@ revision in generated validation results.
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
-| Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
+| Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
 | State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; all four Monte Carlo barostats have CPU implementations and reference fixtures; broader molecular NPT stability and GPU execution remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; integrator settings are shared with the bound Context; broader names/signatures, units and platform selection remain incomplete |
@@ -671,6 +671,86 @@ Throughput is the median and RSS the maximum across three processes, including
 Python. Stochastic integration improves by about 4 to 8 times. Eight-particle
 Verlet is about 6% slower in this measurement, while the larger cases improve.
 Small-system overhead remains optimization work.
+
+## Variable-step integration
+
+`VariableVerletIntegrator` and `VariableLangevinIntegrator` select a step from the
+RMS acceleration, limit increases to twice the preceding internal step and retain
+the old step when a proposed increase is less than 20 percent. A positive maximum
+step size adds a cap; zero disables that cap. `stepTo` also caps the step at the
+remaining time and finishes at the requested time. Past targets perform no steps.
+The initial reported step size is zero. State updates run before selecting the
+next step, so they observe the preceding reported step size, matching Reference.
+
+Variable Verlet advances velocities by half the sum of the old and new steps,
+then reconstructs the stored velocity from the constrained position displacement.
+Variable Langevin reuses LFMiddle's kick, velocity projection, drift, thermostat,
+drift and final position correction. Its random stream remains independent of
+other Contexts. Both classes preserve fixed particles and recompute virtual sites.
+Their kinetic-energy queries use a half-step force correction, including variable
+Langevin, matching the supplied Reference kernel. Thermal velocity initialization
+uses zero force correction for both variable-step classes, as their reference
+classes inherit the base velocity-time offset. This offset is distinct from the
+kinetic-energy correction.
+
+Changing error tolerance resets the internal step history on the next execution.
+Changing variable Langevin temperature or friction also resets that history, while
+preserving its random stream. Setters that restore the preceding settings before
+execution do not reset history. Setting the public step size changes the reported
+value and kinetic-energy correction, but does not overwrite internal step history.
+A newly bound Context starts fresh internal history. Python exposes live settings,
+seeds, force masks and `stepTo` through both naming conventions.
+
+The reference fixture compares 336 states, including constraints, unequal and zero
+masses, virtual sites, force masks, global changes, maximum/error/friction changes,
+reported-step overrides and bounded final steps. Six thermal cases independently
+check position and velocity Gaussian moments over 36,000 components at three
+temperatures and two frictions. The expected variances include covariance between
+position and velocity across the two drifts. Separate tests check constant
+acceleration, step growth and hysteresis, single precision, seed behavior,
+ownership, invalid settings and reuse of dense f64 state storage.
+
+`scripts/benchmark-stochastic.sh variable` uses the same free-particle protocol as
+the fixed-step benchmark, with error tolerance `1e-5` and maximum step 0.001 ps.
+Free particles always select the maximum. Both final simulation time and step
+count are checked, along with kinetic energy. Reference timings include the
+per-step clock repair described below. Throughput is the median and RSS the maximum
+of three processes; the Langevin rows use 300 K.
+
+| Integrator | Particles | Rust steps/s | Reference steps/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Variable Verlet | 8 | 1,253,734 | 2,697,447 | 3,740 | 6,784 |
+| Variable Verlet | 4,096 | 24,602 | 11,948 | 4,812 | 7,432 |
+| Variable Verlet | 65,536 | 1,510 | 740 | 16,016 | 17,984 |
+| Variable Langevin | 8 | 924,600 | 1,260,466 | 4,104 | 7,028 |
+| Variable Langevin | 4,096 | 5,656 | 3,544 | 5,088 | 7,368 |
+| Variable Langevin | 65,536 | 364 | 221 | 16,400 | 19,544 |
+
+The larger cases run faster and use less process memory in Rust. At eight particles,
+Reference remains faster despite the added clock repair. This measures integration
+and adaptive-estimator overhead with zero forces; changing-step molecular systems,
+long-run stability and optimized CPU/GPU platforms remain separate requirements.
+
+### Adaptive-clock compatibility exception
+
+The supplied Reference kernels compare the chosen step with the already capped
+maximum, then replace the clock with the requested final time when they are equal.
+Consequently, `step(1)` with a positive maximum can set time to infinity; `stepTo`
+can jump to a distant target after only one capped step. Both classes reproduce
+this source failure with a 0.001 ps maximum. Rust instead adds the actual step,
+and only snaps the clock to the target when the remaining interval was completed.
+
+Reference trajectory fixtures repair only its clock after each ordinary step.
+Their bounded-step helper temporarily lowers the maximum to the remaining time,
+then restores it. Coordinates, velocities and selected steps still come from the
+unmodified Reference kernel. The fixture records the original clock failure as a
+separate exception. This correction is intentional and is not hidden by tolerance.
+
+Zero forces and no finite step bound produce an infinite proposed first step.
+Rust returns an integration error instead of producing nonfinite coordinates;
+choose a positive maximum or a finite `stepTo` target for this case. Nonfinite targets are rejected.
+These input-domain checks extend the source's behavior and do not establish full
+error compatibility.
 
 ## Documentation discrepancies found during implementation
 

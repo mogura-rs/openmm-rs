@@ -22,6 +22,12 @@ def main():
                 expected = 1.5 * record["particles"] * (1.380649e-23*6.02214076e23/1000) * 300
                 tolerance = 6 * expected * math.sqrt(2 / (3 * record["particles"]))
             assert abs(record["kinetic_energy"]-expected) < tolerance, record
+        if "simulation_time" in record:
+            assert record["step_count"] == record["iterations"]+10,record
+            assert math.isclose(record["simulation_time"],0.001*(record["iterations"]+10),rel_tol=1e-10,abs_tol=1e-10),record
+        if record.get("adaptive"):
+            assert record["maximum_step_size"]==0.001 and record["error_tolerance"]==1e-5,record
+            assert record["clock_repair"] == (record["implementation"]=="openmm-reference"),record
         if record.get("barostat"):
             assert record["volume"] > 0 and abs(record["volume"]-record["expected_volume"]) < 6*record["volume_stddev"], record
         if "box_diagonal" in record:
@@ -60,6 +66,8 @@ def main():
         note = "Single-process f64 integration with AndersenThermostat at 300 K, 37/ps, dt=0.001 ps, no potential forces and 10 warmup steps. Kinetic energy is checked against a six-standard-deviation equilibrium bound; random paths differ. Optimized CPU/GPU platforms are not measured."
     if all("integrator" in record for rows in groups.values() for record in rows):
         note = "Matched single-process f64 free-particle integration at dt=0.001 ps with 10 warmup steps. Stochastic friction is 0.7/ps. Kinetic energy is checked against the finite-time Gaussian mean and a six-standard-deviation bound. Random paths differ. Optimized CPU/GPU platforms are not measured."
+    if all(record.get("adaptive") for rows in groups.values() for record in rows):
+        note += " Adaptive error tolerance is 1e-5 with maximum step 0.001 ps; free particles always select the cap. Reference timing includes per-step clock repair for the supplied kernel bug. The final clock and step count are checked."
     if all(record.get("barostat") for rows in groups.values() for record in rows):
         kinds = {record.get("barostat_kind", "isotropic") for rows in groups.values() for record in rows}
         assert len(kinds) == 1, kinds

@@ -146,6 +146,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - `VerletIntegrator` — leapfrog
 - `LangevinMiddleIntegrator` and `LangevinIntegrator` — LFMiddle splitting
 - `BrownianIntegrator` — overdamped Langevin
+- `VariableVerletIntegrator` and `VariableLangevinIntegrator` — adaptive steps, live settings and bounded target times
 - CPU stochastic integration — direct f64 state updates and per-integrator seeded random streams
 - `NonbondedForce` — cutoff/reaction field, Ewald, PME, LJPME, parameter offsets, switching and dispersion correction
 - Virtual sites — averages, out-of-plane, local coordinates, symmetry and nested dependencies

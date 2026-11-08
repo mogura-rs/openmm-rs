@@ -638,7 +638,7 @@ impl<B: Backend> Context<B> {
             .apply_velocities(&self.positions, &mut self.velocities, tolerance)
     }
 
-    /// Advance the simulation, panicking if constraints fail to converge.
+    /// Advance the simulation, panicking if integration fails.
     pub fn step(&mut self, steps: usize) {
         self.try_step(steps)
             .unwrap_or_else(|error| panic!("{error}"));
@@ -646,56 +646,93 @@ impl<B: Backend> Context<B> {
 
     pub fn try_step(&mut self, steps: usize) -> Result<(), ConstraintError> {
         for _ in 0..steps {
-            for index in 0..self.system.forces().len() {
-                self.system.forces_mut()[index].update_context_velocities(
-                    &mut self.velocities,
-                    &self.host_masses,
-                    self.integrator.step_size(),
-                    self.step_count,
-                );
-                if let Some(vectors) = self.periodic_box_vectors {
-                    let proposal =
-                        self.system.forces_mut()[index].propose_context_box_update(&vectors);
-                    if let Some(proposal) = proposal {
-                        let groups = self.integrator.integration_force_groups();
-                        let old_energy = self.energy_at(&self.positions, &vectors, groups);
-                        let positions = self.prepare_scaled_positions(
-                            proposal.transform,
-                            proposal.scale_molecules_as_rigid,
-                        );
-                        let new_energy = self.energy_at(&positions, &proposal.box_vectors, groups);
-                        let scaled_particles = if proposal.scale_molecules_as_rigid {
-                            self.molecules().len()
-                        } else {
-                            self.system.num_particles()
-                        };
-                        if self.system.forces_mut()[index].accept_context_box_update(
-                            &proposal,
-                            new_energy - old_energy,
-                            scaled_particles,
-                        ) {
-                            self.box_update_positions =
-                                Some(std::mem::replace(&mut self.positions, positions));
-                            self.periodic_box_vectors = Some(proposal.box_vectors);
-                        } else {
-                            self.box_update_positions = Some(positions);
-                        }
+            self.try_step_once(f64::INFINITY)?;
+        }
+        Ok(())
+    }
+
+    pub fn step_to(&mut self, time: f64) {
+        self.try_step_to(time)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    pub fn try_step_to(&mut self, time: f64) -> Result<(), ConstraintError> {
+        if !self.integrator.supports_step_to() {
+            return Err(ConstraintError(
+                "this integrator does not support step_to".into(),
+            ));
+        }
+        if !time.is_finite() || !self.time.is_finite() {
+            return Err(ConstraintError(
+                "step_to requires finite current and target times".into(),
+            ));
+        }
+        while time > self.time {
+            let previous = self.time;
+            let remaining = time - previous;
+            self.try_step_once(remaining)?;
+            if self.integrator.step_size() == remaining {
+                self.time = time;
+            }
+            if self.time <= previous {
+                return Err(ConstraintError(
+                    "step size is too small to advance the clock".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn try_step_once(&mut self, limit: f64) -> Result<(), ConstraintError> {
+        for index in 0..self.system.forces().len() {
+            self.system.forces_mut()[index].update_context_velocities(
+                &mut self.velocities,
+                &self.host_masses,
+                self.integrator.step_size(),
+                self.step_count,
+            );
+            if let Some(vectors) = self.periodic_box_vectors {
+                let proposal = self.system.forces_mut()[index].propose_context_box_update(&vectors);
+                if let Some(proposal) = proposal {
+                    let groups = self.integrator.integration_force_groups();
+                    let old_energy = self.energy_at(&self.positions, &vectors, groups);
+                    let positions = self.prepare_scaled_positions(
+                        proposal.transform,
+                        proposal.scale_molecules_as_rigid,
+                    );
+                    let new_energy = self.energy_at(&positions, &proposal.box_vectors, groups);
+                    let scaled_particles = if proposal.scale_molecules_as_rigid {
+                        self.molecules().len()
+                    } else {
+                        self.system.num_particles()
+                    };
+                    if self.system.forces_mut()[index].accept_context_box_update(
+                        &proposal,
+                        new_energy - old_energy,
+                        scaled_particles,
+                    ) {
+                        self.box_update_positions =
+                            Some(std::mem::replace(&mut self.positions, positions));
+                        self.periodic_box_vectors = Some(proposal.box_vectors);
+                    } else {
+                        self.box_update_positions = Some(positions);
                     }
                 }
             }
-            let (forces, _) =
-                self.calc_forces_and_energy_groups(self.integrator.integration_force_groups());
-            self.integrator.step_constrained(
-                &mut self.positions,
-                &mut self.velocities,
-                &forces,
-                &self.masses,
-                &self.constraints,
-            )?;
-            self.compute_virtual_sites();
-            self.time += self.integrator.step_size();
-            self.step_count += 1;
         }
+        let (forces, _) =
+            self.calc_forces_and_energy_groups(self.integrator.integration_force_groups());
+        self.integrator.step_with_limit(
+            &mut self.positions,
+            &mut self.velocities,
+            &forces,
+            &self.masses,
+            &self.constraints,
+            limit,
+        )?;
+        self.compute_virtual_sites();
+        self.time += self.integrator.step_size();
+        self.step_count += 1;
         Ok(())
     }
 
@@ -861,7 +898,7 @@ impl<B: Backend> Context<B> {
     }
 
     fn kinetic_energy(&self, forces: &Tensor<B, 2>) -> f64 {
-        let offset = self.integrator.velocity_time_offset();
+        let offset = self.integrator.kinetic_energy_time_offset();
         if self.constraints.is_empty() {
             let kinetic = crate::tensor::with_ndarray_f64(&self.velocities, |velocities| {
                 if offset == 0.0 {

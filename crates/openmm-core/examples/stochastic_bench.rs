@@ -2,7 +2,8 @@ use burn::backend::NdArray;
 use burn::tensor::TensorData;
 use openmm_core::{
     integrators::langevin::BOLTZMANN, tensor::from_floats, BrownianIntegrator, Context, Integrator,
-    LangevinMiddleIntegrator, StateFlags, System, VerletIntegrator,
+    LangevinMiddleIntegrator, StateFlags, System, VariableLangevinIntegrator,
+    VariableVerletIntegrator, VerletIntegrator,
 };
 use std::{hint::black_box, time::Instant};
 
@@ -20,6 +21,17 @@ fn main() {
     }
     let integrator: Box<dyn Integrator<B>> = match kind {
         "verlet" => Box::new(VerletIntegrator::new(0.001)),
+        "variable_verlet" => {
+            let mut value = VariableVerletIntegrator::new(1e-5);
+            value.set_maximum_step_size(0.001);
+            Box::new(value)
+        }
+        "variable_langevin" => {
+            let mut value = VariableLangevinIntegrator::new(temperature, 0.7, 1e-5);
+            value.set_maximum_step_size(0.001);
+            value.set_random_number_seed(3721);
+            Box::new(value)
+        }
         "langevin" => {
             let mut value = LangevinMiddleIntegrator::new(temperature, 0.7, 0.001);
             value.set_random_number_seed(3721);
@@ -53,7 +65,7 @@ fn main() {
     .kinetic_energy
     .unwrap();
     let (variance, mean_squared) = match kind {
-        "langevin" => {
+        "langevin" | "variable_langevin" => {
             let decay = (-2.0 * 0.7 * 0.001 * (iterations + 10) as f64).exp();
             (
                 BOLTZMANN * temperature * (1.0 - decay),
@@ -65,5 +77,10 @@ fn main() {
     };
     let expected = 0.5 * (3.0 * n as f64 * variance + mean_squared);
     let stddev = (1.5 * n as f64 * variance * variance + variance * mean_squared).sqrt();
-    println!("{{\"implementation\":\"rust\",\"precision\":\"f64\",\"api\":\"Context.step\",\"integrator\":\"{kind}\",\"temperature\":{temperature},\"particles\":{n},\"iterations\":{iterations},\"seconds\":{seconds},\"evaluations_per_second\":{},\"energy\":0,\"kinetic_energy\":{energy},\"expected_kinetic_energy\":{expected},\"kinetic_energy_stddev\":{stddev}}}",iterations as f64/seconds);
+    let final_state = context.get_state(StateFlags::none());
+    let simulation_time = final_state.time;
+    let step_count = final_state.step_count;
+    let adaptive = kind.starts_with("variable_");
+    let error_tolerance = if adaptive { "0.00001" } else { "null" };
+    println!("{{\"implementation\":\"rust\",\"precision\":\"f64\",\"api\":\"Context.step\",\"integrator\":\"{kind}\",\"temperature\":{temperature},\"particles\":{n},\"iterations\":{iterations},\"seconds\":{seconds},\"evaluations_per_second\":{},\"energy\":0,\"kinetic_energy\":{energy},\"expected_kinetic_energy\":{expected},\"kinetic_energy_stddev\":{stddev},\"simulation_time\":{simulation_time},\"step_count\":{step_count},\"adaptive\":{adaptive},\"maximum_step_size\":0.001,\"error_tolerance\":{error_tolerance},\"clock_repair\":false}}",iterations as f64/seconds);
 }

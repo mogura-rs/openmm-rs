@@ -1,7 +1,7 @@
 use burn::{backend::NdArray, tensor::TensorData};
 use openmm_core::{
     tensor::from_floats, BrownianIntegrator, Context, Integrator, LangevinMiddleIntegrator, System,
-    VerletIntegrator,
+    VariableLangevinIntegrator, VariableVerletIntegrator, VerletIntegrator,
 };
 use std::alloc::{GlobalAlloc, Layout, System as SystemAllocator};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -45,7 +45,13 @@ fn stochastic_cpu_steps_reuse_state_without_dense_temporaries() {
         TensorData::new(vec![0.; 3 * PARTICLES], [PARTICLES, 3]),
         &device,
     );
-    let integrators: [Box<dyn Integrator<B>>; 2] = [
+    let mut variable_verlet = VariableVerletIntegrator::new(1e-5);
+    variable_verlet.set_maximum_step_size(0.001);
+    let mut variable_langevin = VariableLangevinIntegrator::new(300., 1., 1e-5);
+    variable_langevin.set_maximum_step_size(0.001);
+    let integrators: [Box<dyn Integrator<B>>; 4] = [
+        Box::new(variable_verlet),
+        Box::new(variable_langevin),
         Box::new(LangevinMiddleIntegrator::new(300., 1., 0.001)),
         Box::new(BrownianIntegrator::new(300., 1., 0.001)),
     ];
@@ -66,7 +72,13 @@ fn stochastic_cpu_steps_reuse_state_without_dense_temporaries() {
     for _ in 0..PARTICLES {
         system.add_particle(1.0);
     }
-    let integrators: [Box<dyn Integrator<B>>; 3] = [
+    let mut variable_verlet = VariableVerletIntegrator::new(1e-5);
+    variable_verlet.set_maximum_step_size(0.001);
+    let mut variable_langevin = VariableLangevinIntegrator::new(300., 1., 1e-5);
+    variable_langevin.set_maximum_step_size(0.001);
+    let integrators: [Box<dyn Integrator<B>>; 5] = [
+        Box::new(variable_verlet),
+        Box::new(variable_langevin),
         Box::new(VerletIntegrator::new(0.001)),
         Box::new(LangevinMiddleIntegrator::new(300., 1., 0.001)),
         Box::new(BrownianIntegrator::new(300., 1., 0.001)),

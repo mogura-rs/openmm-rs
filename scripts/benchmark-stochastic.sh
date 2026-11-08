@@ -14,9 +14,14 @@ cargo build --release --locked -p openmm-core --example stochastic_bench --jobs 
 time_command="$(type -P time)"
 time_flags=(-v)
 if [[ "$(uname -s)" == Darwin ]]; then time_flags=(-l); fi
-for kind in verlet langevin brownian; do
+case "${1:-fixed}" in
+    fixed) kinds=(verlet langevin brownian) ;;
+    variable) kinds=(variable_verlet variable_langevin) ;;
+    *) echo "Expected fixed or variable" >&2; exit 2 ;;
+esac
+for kind in "${kinds[@]}"; do
     temperatures=(0 300)
-    if [[ "$kind" == verlet ]]; then temperatures=(0); fi
+    if [[ "$kind" == verlet || "$kind" == variable_verlet ]]; then temperatures=(0); fi
     for temperature in "${temperatures[@]}"; do
         directory="benchmark-results/stochastic/$kind/$temperature"
         mkdir -p "$directory"

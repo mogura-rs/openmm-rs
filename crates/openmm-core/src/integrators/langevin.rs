@@ -24,6 +24,9 @@ pub struct LangevinMiddleIntegrator {
 }
 
 impl LangevinMiddleIntegrator {
+    pub(crate) fn initialize_random(&mut self) {
+        self.random.initialize();
+    }
     pub fn random_number_seed(&self) -> i32 {
         self.random.seed()
     }
@@ -140,7 +143,7 @@ impl LangevinMiddleIntegrator {
 
 impl<B: Backend> Integrator<B> for LangevinMiddleIntegrator {
     fn initialize(&mut self) {
-        self.random.initialize();
+        self.initialize_random();
     }
 
     fn integration_force_groups(&self) -> u32 {

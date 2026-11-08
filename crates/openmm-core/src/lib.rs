@@ -61,3 +61,5 @@ pub use forces::cm_motion::CMMotionRemover;
 pub use forces::custom_cv::CustomCVForce;
 pub use forces::flexible_barostat::MonteCarloFlexibleBarostat;
 pub use forces::membrane_barostat::{MembraneXYMode, MembraneZMode, MonteCarloMembraneBarostat};
+
+pub use integrators::variable::{VariableLangevinIntegrator, VariableVerletIntegrator};

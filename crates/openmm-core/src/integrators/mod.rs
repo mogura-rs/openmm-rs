@@ -1,6 +1,7 @@
 pub mod brownian;
 pub mod langevin;
 mod random;
+pub mod variable;
 pub mod verlet;
 
 use crate::constraints::{ConstraintError, ConstraintSolver};
@@ -87,7 +88,28 @@ pub trait Integrator<B: Backend>: Send + Sync {
         Ok(())
     }
 
-    /// Offset between positions and stored velocities in ps.
+    fn supports_step_to(&self) -> bool {
+        false
+    }
+
+    fn step_with_limit(
+        &self,
+        positions: &mut Tensor<B, 2>,
+        velocities: &mut Tensor<B, 2>,
+        forces: &Tensor<B, 2>,
+        masses: &Tensor<B, 1>,
+        constraints: &ConstraintSolver,
+        _limit: f64,
+    ) -> Result<(), ConstraintError> {
+        self.step_constrained(positions, velocities, forces, masses, constraints)
+    }
+
+    /// Force correction used when reporting kinetic energy.
+    fn kinetic_energy_time_offset(&self) -> f64 {
+        self.velocity_time_offset()
+    }
+
+    /// Force correction used when initializing thermal velocities.
     fn velocity_time_offset(&self) -> f64 {
         0.0
     }
