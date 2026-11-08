@@ -52,7 +52,7 @@ revision in generated validation results.
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
-| State updates | Partial | CMMotionRemover applies mass-weighted velocity corrections on its configured schedule; thermostat and barostat implementations remain |
+| State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; barostats remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | Thin CPU wrappers exist, but the interface is not yet OpenMM-compatible |
 | Precision | Partial | CPU core supports f32 and f64; Python uses f64. GPU precision modes remain unverified |
@@ -65,7 +65,7 @@ integrator configurations at four time points, forty-one nonbonded configuration
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
 wrapping configurations, six minimization configurations and 184 custom-expression
-states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states, 864 geometric-expression states, 864 centroid states, 1,296 hydrogen bond states, 336 collective-geometry/volume states, 360 composite-CV states in two force-cache modes and 576 center-of-mass-removal states.
+states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states, 864 geometric-expression states, 864 centroid states, 1,296 hydrogen bond states, 336 collective-geometry/volume states, 360 composite-CV states in two force-cache modes and 576 center-of-mass-removal states. Andersen fixtures add 216 deterministic states and independent collision/velocity-distribution checks on 36,000 particles.
 Geometric fixtures cover external periodic distances, compound distance/angle/dihedral
 functions, explicit point functions, shared particles, triclinic boxes, nested
 functions, table and bond updates, global parameters, groups and short trajectories.
@@ -88,6 +88,21 @@ counts and changed definition objects after Context creation. Velocity updates
 run before force evaluation, in System order, independently of force-group masks.
 State queries do not trigger them. CMMotionRemover adjusts only massive particles
 and keeps the frequency captured when the Context was created, matching Reference.
+AndersenThermostat groups particles by constraint connectivity, draws one collision
+per group with probability `1-exp(-frequency*dt)` and resamples each massive
+particle from the Maxwell distribution. Frequency is in inverse ps and temperature
+is in kelvin. Context parameters change the running values; force setters change the definition
+defaults. Rust captures defaults when constructing a Context. The current Python
+System snapshots forces at `add_force`, so later changes to the retained Python
+object do not yet affect newly constructed Contexts; shared force ownership remains
+a Python compatibility gap. Fixed particles retain their
+velocities. The Rust implementation uses a per-thermostat ChaCha12 generator:
+nonzero seeds reproduce Rust runs, while seed zero initializes from OS entropy.
+Cross-implementation random paths are not identical. Deterministic tests cover
+zero collision frequency, zero temperature, certain collisions, all three
+integrators, constraints, force groups, massless particles and parameter changes.
+Statistical tests separately check the collision probability, transitive groups,
+normalized first/second/fourth velocity moments and mass scaling.
 Custom nonbonded fixtures cover all three methods, switching, overlapping and
 empty interaction groups, computed values, table updates, global changes, box
 changes and long-range corrections. Pair forces and energies use strict double
@@ -252,14 +267,14 @@ At 13,824 particles, the three-repetition measurements were:
 
 | Force | Rust median requests/s | Reference median requests/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
 | --- | ---: | ---: | ---: | ---: |
-| RMSD | 5,237 | 1,926 | 9,188 | 10,612 |
-| Orientation restraint | 6,334 | 1,152 | 9,196 | 10,896 |
-| RG | 7,623 | 3,995 | 8,388 | 9,892 |
+| RMSD | 4,787 | 1,927 | 8,228 | 10,460 |
+| Orientation restraint | 6,093 | 1,123 | 8,336 | 10,592 |
+| RG | 7,626 | 3,990 | 7,500 | 9,872 |
 
 RSS is the maximum across the three processes. These results use the scripted
 coordinate workload and the Reference platform; they do not establish GPU or
-optimized OpenMM CPU performance. The current code passed all 17 reference
-fixtures with 496,079 scalar comparisons, 111 Rust tests and a build with the
+optimized OpenMM CPU performance. The current code passed all 18 reference
+fixtures with 506,447 scalar comparisons, 120 Rust tests and a build with the
 default backend feature disabled.
 
 `scripts/benchmark-cv.sh` measures a weighted mean of disjoint RG selections,
@@ -270,12 +285,12 @@ The default bounded cache measurements were:
 
 | Particles | CVs | Rust median requests/s | Reference median requests/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4,096 | 2 | 20,799 | 8,433.6 | 5,328 | 8,884 |
-| 4,096 | 8 | 17,174 | 2,219.6 | 5,316 | 9,332 |
-| 4,096 | 32 | 15,060 | 565.8 | 5,176 | 12,200 |
-| 65,536 | 2 | 1,269 | 464.8 | 22,316 | 27,776 |
-| 65,536 | 8 | 755 | 105.2 | 22,220 | 36,576 |
-| 65,536 | 32 | 779 | 24.7 | 22,300 | 75,004 |
+| 4,096 | 2 | 20,787 | 8,440 | 4,900 | 8,824 |
+| 4,096 | 8 | 17,208 | 2,216 | 4,892 | 9,328 |
+| 4,096 | 32 | 15,196 | 565.8 | 4,848 | 12,368 |
+| 65,536 | 2 | 1,271 | 465.3 | 17,360 | 27,720 |
+| 65,536 | 8 | 757.9 | 105.9 | 17,196 | 36,960 |
+| 65,536 | 32 | 768.8 | 25.0 | 17,336 | 75,040 |
 
 Unbounded and disabled caches were also measured. RG uses direct accumulation
 in every mode, so these cases do not retain dense child force arrays. Generic
@@ -283,6 +298,27 @@ CV children still use the configured tensor cache. These measurements establish
 performance for the scripted RG composition and Reference platform only;
 optimized CPU/GPU platforms, other CV workloads and integration remain separate
 requirements.
+
+`scripts/benchmark-andersen.sh` measures complete Verlet integration with an
+Andersen thermostat at 300 K, collision frequency 37/ps and timestep 0.001 ps,
+without potential forces. It uses 10 warmup steps, then 1,000 steps at 4,096
+particles or 300 at 65,536, with three process repetitions. Random paths differ;
+each final kinetic energy must lie within six equilibrium standard deviations.
+
+| Particles | Rust median steps/s | Reference median steps/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
+| ---: | ---: | ---: | ---: | ---: |
+| 4,096 | 17,068 | 7,948 | 4,908 | 7,668 |
+| 65,536 | 1,112 | 493 | 19,176 | 22,188 |
+
+The initial implementation reached 164 steps/s and 28,476 KiB at 65,536 particles.
+The CPU f64 Verlet update now reads forces and masses through borrowed views and
+updates coordinates/velocities in one pass. Andersen and center-of-mass updates
+reuse mutable velocity storage. Shared State snapshots trigger copy-on-write,
+and noncontiguous tensors retain logical element order. Other backends retain
+their tensor paths. Molecular connectivity is constructed lazily when requested
+or needed for periodic wrapping; invalid bonded indices are still rejected at
+Context initialization. These measurements cover this thermostat workload on the
+Reference platform, not optimized CPU/GPU platforms or molecular force fields.
 
 ## Validation and optimization rules
 
@@ -343,6 +379,17 @@ belong under ignored directories.
   as fs and inverse fs. Its caller passes ps and inverse ps, matching the public
   `AndersenThermostat` header. The internal comment is stale; the reference code
   uses the public units.
+
+- `CLAUDE.md` omitted the direct optional ndarray dependency from its CPU feature
+  example and prescribed Burn autodiff for custom forces. The implementation uses
+  compiled scalar expressions with reverse-mode derivatives and analytic geometry;
+  the guide now describes that implementation. Its mdtraj-rs entry also described
+  file I/O as available even though the dependency is still disabled.
+
+- HarmonicBondForce and CustomBondForce parameter updates previously copied changed
+  particle indices, although Reference rejects changes to bond membership. They
+  now reject such updates before modifying the Context. This also preserves the
+  connectivity used by lazy molecule construction.
 
 Implementation and reference tests take precedence over outdated descriptions.
 

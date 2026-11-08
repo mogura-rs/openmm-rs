@@ -159,7 +159,14 @@ impl CustomBondForce {
             source.bonds.len(),
             "bond count must match"
         );
-        self.bonds = source.bonds.clone();
+        for (bond, other) in self.bonds.iter().zip(&source.bonds) {
+            assert_eq!(
+                (bond.p1, bond.p2),
+                (other.p1, other.p2),
+                "bond particles cannot change in a Context"
+            );
+        }
+        self.bonds.clone_from(&source.bonds);
     }
 }
 

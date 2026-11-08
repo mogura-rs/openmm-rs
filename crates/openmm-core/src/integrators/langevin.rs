@@ -6,7 +6,7 @@ use crate::constraints::{ConstraintError, ConstraintSolver};
 use burn::prelude::*;
 
 /// Boltzmann constant in kJ/mol/K.
-pub const BOLTZMANN: f64 = 0.008314462618;
+pub const BOLTZMANN: f64 = 1.380649e-23 * 6.02214076e23 / 1000.0;
 
 pub struct LangevinMiddleIntegrator {
     /// Step size in ps.

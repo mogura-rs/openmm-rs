@@ -26,6 +26,7 @@ use crate::system::{validate_box_vectors, System};
 use crate::units::BoxVectors;
 use crate::virtual_sites::VirtualSitePlan;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 pub struct Context<B: Backend> {
     system: System<B>,
@@ -41,7 +42,7 @@ pub struct Context<B: Backend> {
     masses: Tensor<B, 1>,
     host_masses: Vec<f64>,
     virtual_sites: VirtualSitePlan,
-    molecules: Vec<Vec<usize>>,
+    molecules: OnceLock<Vec<Vec<usize>>>,
 }
 
 impl<B: Backend> Context<B> {
@@ -67,12 +68,16 @@ impl<B: Backend> Context<B> {
         );
         let periodic_box_vectors = system.default_periodic_box_vectors().copied();
         let masses = system.masses();
+        let constraint_definitions = system.constraints().to_vec();
         for force in system.forces_mut() {
             force.initialize_masses(&masses);
+            force.initialize_constraints(n, &constraint_definitions);
             force.initialize(n, periodic_box_vectors.as_ref());
+            for (a, b) in force.bonded_particles() {
+                assert!(a < n && b < n, "bonded particle index out of range");
+            }
         }
         let virtual_sites = VirtualSitePlan::new(system.virtual_sites(), &masses);
-        let molecules = system.molecules();
         let constraints = ConstraintSolver::new(system.constraints(), &masses)
             .unwrap_or_else(|error| panic!("{error}"));
         let host_masses = masses;
@@ -104,7 +109,7 @@ impl<B: Backend> Context<B> {
             masses,
             host_masses,
             virtual_sites,
-            molecules,
+            molecules: OnceLock::new(),
         }
     }
 
@@ -579,7 +584,8 @@ impl<B: Backend> Context<B> {
             }
         }
 
-        let mut total_forces = total_forces.unwrap_or_else(|| Tensor::zeros([n, 3], &self.device));
+        let mut total_forces =
+            total_forces.unwrap_or_else(|| crate::tensor::zeros([n, 3], &self.device));
         self.virtual_sites.distribute_forces(
             self.system.virtual_sites(),
             &self.positions,
@@ -653,7 +659,7 @@ impl<B: Backend> Context<B> {
     }
 
     pub fn molecules(&self) -> &[Vec<usize>] {
-        &self.molecules
+        self.molecules.get_or_init(|| self.system.molecules())
     }
 
     pub fn get_state_options(
@@ -784,7 +790,7 @@ impl<B: Backend> Context<B> {
             .convert::<f64>()
             .to_vec::<f64>()
             .unwrap();
-        for molecule in &self.molecules {
+        for molecule in self.molecules() {
             let mut center = [0.0; 3];
             for &particle in molecule {
                 for axis in 0..3 {

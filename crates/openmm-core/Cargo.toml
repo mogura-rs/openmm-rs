@@ -18,6 +18,9 @@ uom.workspace = true
 # mdtraj-rs.workspace = true  # uncomment when file I/O module is implemented
 rustfft = "6"
 libm = "0.2"
+rand = "0.9"
+rand_chacha = "0.9"
+rand_distr = "0.5"
 ndarray = { version = "0.17.2", optional = true }
 
 [dev-dependencies]

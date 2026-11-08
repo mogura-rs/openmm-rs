@@ -1,4 +1,5 @@
 pub mod alignment;
+pub mod andersen;
 pub mod cm_motion;
 pub mod cmap_torsion;
 pub mod custom_angle;
@@ -127,6 +128,13 @@ where
 /// Returned energy: kJ/mol.
 pub trait Force<B: Backend>: Send + Sync + AsAny + ForceClone<B> {
     fn initialize_masses(&mut self, _masses: &[f64]) {}
+
+    fn initialize_constraints(
+        &mut self,
+        _num_particles: usize,
+        _constraints: &[crate::Constraint],
+    ) {
+    }
 
     fn update_context_velocities(
         &mut self,

@@ -1,4 +1,6 @@
+mod andersen;
 mod cm_motion;
+use andersen::PyAndersenThermostat;
 use cm_motion::PyCMMotionRemover;
 mod custom_cv;
 use custom_cv::PyCustomCVForce;
@@ -1969,6 +1971,9 @@ impl PySystem {
 }
 
 fn extract_force_snapshot(force: &Bound<'_, PyAny>) -> PyResult<Box<dyn openmm_core::Force<B>>> {
+    if let Ok(force) = force.extract::<PyRef<'_, PyAndersenThermostat>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
     if let Ok(force) = force.extract::<PyRef<'_, PyCMMotionRemover>>() {
         return Ok(Box::new(force.inner.clone()));
     }
@@ -2348,6 +2353,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCustomVolumeForce>()?;
     m.add_class::<PyCustomCVForce>()?;
     m.add_class::<PyCMMotionRemover>()?;
+    m.add_class::<PyAndersenThermostat>()?;
     m.add_class::<PyCustomAngleForce>()?;
     m.add_class::<PyCustomNonbondedForce>()?;
     m.add_class::<PyCMAPTorsionForce>()?;

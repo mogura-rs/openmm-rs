@@ -55,24 +55,32 @@ impl<B: Backend> Force<B> for CMMotionRemover {
         if mass == 0.0 {
             return;
         }
-        let mut values = crate::tensor::to_f64_vec(velocities);
-        let mut momentum = [0.0; 3];
-        for (velocity, mass) in values.chunks_exact(3).zip(masses) {
-            for axis in 0..3 {
-                momentum[axis] += mass * velocity[axis];
-            }
-        }
-        for component in &mut momentum {
-            *component /= mass;
-        }
-        for (velocity, &mass) in values.chunks_exact_mut(3).zip(masses) {
-            if mass != 0.0 {
+        let mut update = Some(|values: &mut [f64]| {
+            let mut momentum = [0.0; 3];
+            for (velocity, mass) in values.chunks_exact(3).zip(masses) {
                 for axis in 0..3 {
-                    velocity[axis] -= momentum[axis];
+                    momentum[axis] += mass * velocity[axis];
                 }
             }
+            for component in &mut momentum {
+                *component /= mass;
+            }
+            for (velocity, &mass) in values.chunks_exact_mut(3).zip(masses) {
+                if mass != 0.0 {
+                    for axis in 0..3 {
+                        velocity[axis] -= momentum[axis];
+                    }
+                }
+            }
+        });
+        if crate::tensor::with_mut_ndarray_f64(velocities, |values| update.take().unwrap()(values))
+            .is_none()
+        {
+            let mut values = crate::tensor::to_f64_vec(velocities);
+            update.take().unwrap()(&mut values);
+            *velocities =
+                crate::tensor::from_f64_vec(values, [masses.len(), 3], &velocities.device());
         }
-        *velocities = crate::tensor::from_f64_vec(values, [masses.len(), 3], &velocities.device());
     }
 
     fn calc_forces_and_energy_groups(

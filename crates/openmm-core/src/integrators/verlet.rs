@@ -71,6 +71,30 @@ impl<B: Backend> Integrator<B> for VerletIntegrator {
         masses: &Tensor<B, 1>,
     ) {
         let dt = self.dt;
+        let updated = crate::tensor::with_ndarray_f64(forces, |force| {
+            crate::tensor::with_ndarray_f64(masses, |mass| {
+                crate::tensor::with_mut_ndarray_f64(velocities, |velocity| {
+                    crate::tensor::with_mut_ndarray_f64(positions, |position| {
+                        for (atom, &mass) in mass.iter().enumerate() {
+                            if mass != 0.0 {
+                                let inverse_mass = mass.recip();
+                                for axis in 0..3 {
+                                    let index = 3 * atom + axis;
+                                    velocity[index] += force[index] * inverse_mass * dt;
+                                    position[index] += velocity[index] * dt;
+                                }
+                            }
+                        }
+                    })
+                })
+                .flatten()
+            })
+            .flatten()
+        })
+        .flatten();
+        if updated.is_some() {
+            return;
+        }
 
         // a = F / m,  where masses are [N] and forces/velocities are [N, 3].
         // Expand masses to [N, 1] for broadcasting.

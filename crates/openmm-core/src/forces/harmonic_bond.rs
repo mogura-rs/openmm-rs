@@ -73,7 +73,14 @@ impl HarmonicBondForce {
             source.bonds.len(),
             "bond count must match"
         );
-        self.bonds = source.bonds.clone();
+        for (bond, other) in self.bonds.iter().zip(&source.bonds) {
+            assert_eq!(
+                (bond.particle1, bond.particle2),
+                (other.particle1, other.particle2),
+                "bond particles cannot change in a Context"
+            );
+        }
+        self.bonds.clone_from(&source.bonds);
     }
 }
 

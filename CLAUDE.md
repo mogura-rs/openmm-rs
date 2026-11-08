@@ -13,12 +13,12 @@ The full compatibility and performance target is tracked in
 
 | Crate | Purpose |
 |---|---|
-| `burn` | Tensor operations and automatic differentiation (force = -∇E) |
+| `burn` | Backend tensors for CPU and GPU feature configurations |
 | `rustfft` | 3D FFT for Particle Mesh Ewald (PME) electrostatics |
 | `nalgebra` | Coordinate transforms and small matrix ops outside burn tensors |
 | `rayon` | CPU parallelism outside of burn tensor operations |
 | `uom` | Physical unit type safety (nm, kJ/mol, Da, etc.) |
-| `mdtraj-rs` | Trajectory file I/O (PDB, DCD, XTC) |
+| `mdtraj-rs` | Planned trajectory file I/O; the dependency is currently disabled |
 | `approx` | Floating-point comparison in tests |
 | `pyo3` | Python bindings (thin layer only) |
 
@@ -84,7 +84,7 @@ The Python binding layer (`openmm-py`) fixes the backend to `NdArray<f64>` — t
 
 ```toml
 # openmm-core/Cargo.toml features
-ndarray = ["burn/ndarray"]   # default CPU
+ndarray = ["burn/ndarray", "dep:ndarray"]   # default CPU
 wgpu    = ["burn/wgpu"]
 cuda    = ["burn/cuda"]
 ```
@@ -114,7 +114,7 @@ pub trait Force<B: Backend>: Send + Sync {
 }
 ```
 
-Use analytic gradients for simple forces (HarmonicBond, HarmonicAngle). Use `burn` autodiff for complex ones (CustomGBForce, etc.).
+Use analytic gradients for geometric force terms. Custom scalar expressions use the compiled expression graph and its reverse-mode derivatives; reuse that evaluator when extending custom forces.
 
 ### Python Binding Strategy
 
@@ -151,6 +151,8 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - Constraints — sparse SHAKE/RATTLE position and velocity projection
 - Custom bond, angle, torsion, external, nonbonded, compound, centroid, hydrogen-bond and volume forces — compiled expressions, tabulated/geometric functions and analytic derivatives
 - RMSD, radius of gyration and orientation restraint — quaternion alignment and analytic forces
+- CustomCVForce — nested force composition and analytic chain-rule derivatives
+- CMMotionRemover and AndersenThermostat — ordered velocity updates, constraint-group collisions and runtime thermostat parameters
 - Python wrappers — partial snake_case CPU interface
 
 ### Next

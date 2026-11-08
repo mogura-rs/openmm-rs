@@ -107,6 +107,59 @@ pub(crate) fn with_ndarray_f64<B: Backend, const D: usize, R>(
     None
 }
 
+pub(crate) fn with_mut_ndarray_f64<B: Backend, const D: usize, R>(
+    _tensor: &mut Tensor<B, D>,
+    _modify: impl FnOnce(&mut [f64]) -> R,
+) -> Option<R> {
+    #[cfg(feature = "ndarray")]
+    {
+        use burn::backend::ndarray::NdArrayTensor;
+        use burn::tensor::TensorPrimitive;
+        use std::any::{Any, TypeId};
+        if TypeId::of::<B::FloatTensorPrimitive>() != TypeId::of::<NdArrayTensor>()
+            || TypeId::of::<B::FloatElem>() != TypeId::of::<f64>()
+        {
+            return None;
+        }
+        let mut result = None;
+        _tensor.inplace(|tensor| {
+            let mut primitive = tensor.into_primitive();
+            if let TensorPrimitive::Float(raw) = &mut primitive {
+                if let Some(NdArrayTensor::F64(storage)) =
+                    (raw as &mut dyn Any).downcast_mut::<NdArrayTensor>()
+                {
+                    let array = storage.ensure_owned();
+                    if !array.is_standard_layout() {
+                        *array = array.as_standard_layout().into_owned().into_shared();
+                    }
+                    result = Some(_modify(array.as_slice_mut().unwrap()));
+                }
+            }
+            Tensor::from_primitive(primitive)
+        });
+        result
+    }
+    #[cfg(not(feature = "ndarray"))]
+    None
+}
+
+pub(crate) fn zeros<B: Backend, const D: usize>(
+    shape: [usize; D],
+    device: &B::Device,
+) -> Tensor<B, D> {
+    #[cfg(feature = "ndarray")]
+    {
+        use burn::backend::ndarray::NdArrayTensor;
+        use std::any::TypeId;
+        if TypeId::of::<B::FloatTensorPrimitive>() == TypeId::of::<NdArrayTensor>()
+            && TypeId::of::<B::FloatElem>() == TypeId::of::<f64>()
+        {
+            return from_f64_vec(vec![0.0; shape.iter().product()], shape, device);
+        }
+    }
+    Tensor::zeros(shape, device)
+}
+
 pub(crate) fn with_f64_data<B: Backend, const D: usize, R>(
     tensor: &Tensor<B, D>,
     read: impl FnOnce(&[f64]) -> R,
@@ -138,5 +191,37 @@ mod tests {
             to_f64_vec(&single.swap_dims(0, 1)),
             vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
         );
+    }
+
+    #[test]
+    fn host_writes_reuse_unique_storage_and_preserve_shared_and_strided_values() {
+        let mut values = from_f64_vec::<NdArray<f64>, 2>(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            [2, 3],
+            &Default::default(),
+        );
+        let address = with_ndarray_f64(&values, |v| v.as_ptr() as usize).unwrap();
+        assert_eq!(with_mut_ndarray_f64(&mut values, |v| v[0] += 1.0), Some(()));
+        assert_eq!(
+            with_ndarray_f64(&values, |v| v.as_ptr() as usize),
+            Some(address)
+        );
+        let snapshot = values.clone();
+        with_mut_ndarray_f64(&mut values, |v| v[1] = 7.0).unwrap();
+        assert_eq!(to_f64_vec(&snapshot), [2.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_ne!(
+            with_ndarray_f64(&values, |v| v.as_ptr() as usize),
+            Some(address)
+        );
+        let mut strided = values.swap_dims(0, 1);
+        with_mut_ndarray_f64(&mut strided, |v| v[2] = 8.0).unwrap();
+        assert_eq!(strided.dims(), [3, 2]);
+        assert_eq!(to_f64_vec(&strided), [2.0, 4.0, 8.0, 5.0, 3.0, 6.0]);
+        let mut single = from_f64_vec::<NdArray<f32>, 2>(vec![1.0; 6], [2, 3], &Default::default());
+        assert!(with_mut_ndarray_f64(&mut single, |_| panic!(
+            "single precision must use its fallback"
+        ))
+        .is_none());
+        assert_eq!(to_f64_vec(&single), [1.0; 6]);
     }
 }
