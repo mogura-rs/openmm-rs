@@ -4,7 +4,9 @@ use crate::tabulated::TabulatedFunction;
 use std::collections::HashMap;
 use std::fmt;
 mod geometry;
+mod vector;
 use geometry::GeometryFunction;
+pub use vector::{VectorExpression, VectorWorkspace};
 
 #[derive(Debug, Clone, Copy)]
 enum FunctionBinding {
@@ -168,7 +170,12 @@ impl Expression {
                 parse_tree(value, &definitions, allow_unbound, geometry)?,
             );
         }
-        let root = optimize(parse_tree(parts[0], &definitions, allow_unbound, geometry)?);
+        let root = parse_tree(parts[0], &definitions, allow_unbound, geometry)?;
+        Ok(Self::from_root(root, geometry))
+    }
+
+    fn from_root(root: Expr, geometry: GeometryMode) -> Self {
+        let root = optimize(root);
         let mut variables = Vec::new();
         collect_vars(&root, &mut variables);
         variables.sort();
@@ -189,7 +196,7 @@ impl Expression {
             call.derivative_offset = offset;
             offset += call.arguments.len();
         }
-        Ok(Self {
+        Self {
             instructions,
             variables,
             function_bindings: function_names
@@ -199,7 +206,7 @@ impl Expression {
             function_names,
             function_calls,
             tables: Vec::new(),
-        })
+        }
     }
 
     pub fn add_tabulated_function(
