@@ -142,6 +142,12 @@ impl LangevinMiddleIntegrator {
 }
 
 impl<B: Backend> Integrator<B> for LangevinMiddleIntegrator {
+    fn set_step_size(&mut self, value: f64) {
+        LangevinMiddleIntegrator::set_step_size(self, value);
+    }
+    fn set_constraint_tolerance(&mut self, value: f64) {
+        LangevinMiddleIntegrator::set_constraint_tolerance(self, value);
+    }
     fn initialize(&mut self) {
         self.initialize_random();
     }
@@ -193,6 +199,14 @@ impl<B: Backend> Integrator<B> for LangevinMiddleIntegrator {
 
     fn step_size(&self) -> f64 {
         self.dt
+    }
+
+    fn velocity_time_offset(&self) -> f64 {
+        0.5 * self.dt
+    }
+
+    fn kinetic_energy_time_offset(&self) -> f64 {
+        0.0
     }
 
     fn constraint_tolerance(&self) -> f64 {

@@ -1,9 +1,10 @@
 use super::{err, group_mask, PyContext, B};
 use burn::prelude::*;
 use openmm_core::constraints::{ConstraintError, ConstraintSolver};
+use openmm_core::integrators::IntegratorComponent;
 use openmm_core::{
-    BrownianIntegrator, Context, Integrator, LangevinMiddleIntegrator, VariableLangevinIntegrator,
-    VariableVerletIntegrator, VerletIntegrator,
+    BrownianIntegrator, CompoundIntegrator, Context, Integrator, LangevinMiddleIntegrator,
+    VariableLangevinIntegrator, VariableVerletIntegrator, VerletIntegrator,
 };
 use pyo3::prelude::*;
 use std::{
@@ -13,50 +14,84 @@ use std::{
 };
 
 pub(crate) type SharedContext = Rc<RefCell<Context<B>>>;
+#[derive(Default)]
+struct LinkState {
+    context: Weak<RefCell<Context<B>>>,
+    path: Vec<usize>,
+    parent: Weak<RefCell<LinkState>>,
+    ever_bound: bool,
+}
+
 #[derive(Clone, Default)]
-pub(crate) struct ContextLink(Rc<RefCell<Weak<RefCell<Context<B>>>>>);
+pub(crate) struct ContextLink(Rc<RefCell<LinkState>>);
 
 impl ContextLink {
     fn check_available(&self) -> PyResult<()> {
-        if self.0.borrow().upgrade().is_some() {
+        let state = self.0.borrow();
+        if state.context.upgrade().is_some() {
             Err(err("this Integrator is already bound to a Context"))
+        } else if state.parent.upgrade().is_some() {
+            Err(err(
+                "this Integrator is already owned by a CompoundIntegrator",
+            ))
         } else {
             Ok(())
         }
     }
 
-    pub(crate) fn bind(&self, context: &SharedContext) {
-        *self.0.borrow_mut() = Rc::downgrade(context);
+    fn bind(&self, context: &SharedContext, path: Vec<usize>) {
+        let mut state = self.0.borrow_mut();
+        state.context = Rc::downgrade(context);
+        state.path = path;
+        state.ever_bound = true;
     }
 
     fn step_to(&self, time: f64) -> PyResult<()> {
-        let context = self
-            .0
-            .borrow()
+        let state = self.0.borrow();
+        let context = state
+            .context
             .upgrade()
             .ok_or_else(|| err("this Integrator is not bound to a Context"))?;
         let mut core = context
             .try_borrow_mut()
             .map_err(|_| err("the Context is already in use"))?;
-        core.try_step_to(time).map_err(|e| err(&e.to_string()))
+        core.try_step_to_component(&state.path, time)
+            .map_err(|e| err(&e.to_string()))
     }
 
     fn step(&self, steps: usize) -> PyResult<()> {
-        let context = self
-            .0
-            .borrow()
+        let state = self.0.borrow();
+        let context = state
+            .context
             .upgrade()
             .ok_or_else(|| err("this Integrator is not bound to a Context"))?;
         let mut core = context
             .try_borrow_mut()
             .map_err(|_| err("the Context is already in use"))?;
-        core.try_step(steps).map_err(|e| err(&e.to_string()))
+        core.try_step_component(&state.path, steps)
+            .map_err(|e| err(&e.to_string()))
     }
 }
 
 struct SharedIntegrator<T>(Arc<Mutex<T>>);
 
 impl<T: Integrator<B>> Integrator<B> for SharedIntegrator<T> {
+    fn selected_integrator(&self) -> Option<usize> {
+        self.0.lock().unwrap().selected_integrator()
+    }
+    fn select_integrator(&mut self, index: usize) -> Result<(), ConstraintError> {
+        self.0.lock().unwrap().select_integrator(index)
+    }
+    fn component(&self, path: &[usize]) -> Option<IntegratorComponent<B>> {
+        self.0.lock().unwrap().component(path)
+    }
+    fn set_step_size(&mut self, value: f64) {
+        self.0.lock().unwrap().set_step_size(value);
+    }
+    fn set_constraint_tolerance(&mut self, value: f64) {
+        self.0.lock().unwrap().set_constraint_tolerance(value);
+    }
+
     fn initialize(&mut self) {
         self.0.lock().unwrap().initialize();
     }
@@ -408,13 +443,151 @@ integrator_class!(
     }
 );
 
-pub(crate) fn prepare(
+#[pyclass(unsendable, name = "CompoundIntegrator")]
+pub(crate) struct PyCompoundIntegrator {
+    inner: Arc<Mutex<CompoundIntegrator<B>>>,
+    link: ContextLink,
+    children: Vec<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PyCompoundIntegrator {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(CompoundIntegrator::new())),
+            link: ContextLink::default(),
+            children: Vec::new(),
+        }
+    }
+
+    fn add_integrator(mut slf: PyRefMut<'_, Self>, object: &Bound<'_, PyAny>) -> PyResult<usize> {
+        if slf.link.0.borrow().ever_bound {
+            return Err(err("cannot add an integrator after binding to a Context"));
+        }
+        if slf.as_ptr() == object.as_ptr() {
+            return Err(err("integrator ownership cannot contain a cycle"));
+        }
+        let (core, link) = prepare_shared(object)?;
+        link.check_available()?;
+        let mut ancestor = Some(slf.link.0.clone());
+        while let Some(parent) = ancestor {
+            if Rc::ptr_eq(&parent, &link.0) {
+                return Err(err("integrator ownership cannot contain a cycle"));
+            }
+            ancestor = parent.borrow().parent.upgrade();
+        }
+        let index = slf.inner.lock().unwrap().add_integrator(core);
+        link.0.borrow_mut().parent = Rc::downgrade(&slf.link.0);
+        slf.children.push(object.clone().unbind());
+        Ok(index)
+    }
+
+    fn get_num_integrators(&self) -> usize {
+        self.children.len()
+    }
+    fn get_integrator(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyAny>> {
+        self.children
+            .get(index)
+            .map(|x| x.clone_ref(py))
+            .ok_or_else(|| err("integrator index out of range"))
+    }
+    fn get_current_integrator(&self) -> usize {
+        self.inner.lock().unwrap().current_integrator()
+    }
+    fn set_current_integrator(&self, index: usize) -> PyResult<()> {
+        if index >= self.children.len() {
+            return Err(err("integrator index out of range"));
+        }
+        self.inner.lock().unwrap().set_current_integrator(index);
+        Ok(())
+    }
+    fn step(&self, steps: usize) -> PyResult<()> {
+        self.link.step(steps)
+    }
+    #[pyo3(name = "getStepSize")]
+    fn read_step_size(&self, py: Python<'_>) -> PyResult<f64> {
+        self.check_nonempty(py)?;
+        Ok(self.inner.lock().unwrap().step_size())
+    }
+    #[getter]
+    fn step_size(&self, py: Python<'_>) -> PyResult<f64> {
+        self.read_step_size(py)
+    }
+    fn set_step_size(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+        self.check_nonempty(py)?;
+        self.children[self.get_current_integrator()]
+            .bind(py)
+            .call_method1("setStepSize", (value,))?;
+        Ok(())
+    }
+    fn get_constraint_tolerance(&self, py: Python<'_>) -> PyResult<f64> {
+        self.check_nonempty(py)?;
+        Ok(self.inner.lock().unwrap().constraint_tolerance())
+    }
+    fn set_constraint_tolerance(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+        self.check_nonempty(py)?;
+        positive(value, "constraint tolerance")?;
+        if value >= 1.0 {
+            return Err(err("constraint tolerance must be less than one"));
+        }
+        self.inner.lock().unwrap().set_constraint_tolerance(value);
+        Ok(())
+    }
+    fn get_integration_force_groups(&self, py: Python<'_>) -> PyResult<i32> {
+        self.check_nonempty(py)?;
+        Ok(self.inner.lock().unwrap().integration_force_groups() as i32)
+    }
+    fn set_integration_force_groups(&self, groups: i64) -> PyResult<()> {
+        let groups = group_mask(groups)?;
+        self.inner
+            .lock()
+            .unwrap()
+            .set_integration_force_groups(groups);
+        Ok(())
+    }
+}
+
+impl PyCompoundIntegrator {
+    fn check_nonempty(&self, py: Python<'_>) -> PyResult<()> {
+        if self.children.is_empty() {
+            return Err(err("CompoundIntegrator requires at least one child"));
+        }
+        // Nested compounds may still be empty before a Context is created.
+        let child = self.children[self.get_current_integrator()].bind(py);
+        if let Ok(compound) = child.extract::<PyRef<'_, Self>>() {
+            compound.check_nonempty(py)?;
+        }
+        Ok(())
+    }
+}
+
+fn collect_bindings(
     object: &Bound<'_, PyAny>,
-) -> PyResult<(Box<dyn Integrator<B>>, ContextLink)> {
+    path: Vec<usize>,
+    bindings: &mut Vec<(ContextLink, Vec<usize>)>,
+) -> PyResult<()> {
+    let py = object.py();
+    let (_, link) = prepare_shared(object)?;
+    if link.0.borrow().context.upgrade().is_some() {
+        return Err(err("this Integrator is already bound to a Context"));
+    }
+    bindings.push((link, path.clone()));
+    if let Ok(compound) = object.extract::<PyRef<'_, PyCompoundIntegrator>>() {
+        compound.check_nonempty(py)?;
+        for (index, child) in compound.children.iter().enumerate() {
+            let mut child_path = path.clone();
+            child_path.push(index);
+            collect_bindings(child.bind(object.py()), child_path, bindings)?;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_shared(object: &Bound<'_, PyAny>) -> PyResult<(Box<dyn Integrator<B>>, ContextLink)> {
     macro_rules! extract {
         ($class:ty) => {
             if let Ok(integrator) = object.extract::<PyRef<'_, $class>>() {
-                integrator.link.check_available()?;
                 return Ok((
                     Box::new(SharedIntegrator(integrator.inner.clone())),
                     integrator.link.clone(),
@@ -422,6 +595,7 @@ pub(crate) fn prepare(
             }
         };
     }
+    extract!(PyCompoundIntegrator);
     extract!(PyVariableVerletIntegrator);
     extract!(PyVariableLangevinIntegrator);
     extract!(PyVerletIntegrator);
@@ -435,7 +609,10 @@ pub(crate) fn create_context(
     integrator: &Bound<'_, PyAny>,
 ) -> PyResult<PyContext> {
     let py = integrator.py();
-    let (core, link) = prepare(integrator)?;
+    let (core, link) = prepare_shared(integrator)?;
+    link.check_available()?;
+    let mut bindings = Vec::new();
+    collect_bindings(integrator, Vec::new(), &mut bindings)?;
     let snapshot = system.borrow(py).snapshot(py)?;
     if !snapshot.uses_periodic_boundary_conditions()
         && snapshot
@@ -456,7 +633,9 @@ pub(crate) fn create_context(
         core,
         Default::default(),
     )));
-    link.bind(&inner);
+    for (link, path) in bindings {
+        link.bind(&inner, path);
+    }
     Ok(PyContext {
         inner,
         system,
@@ -466,6 +645,7 @@ pub(crate) fn create_context(
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PyCompoundIntegrator>()?;
     module.add_class::<PyVariableVerletIntegrator>()?;
     module.add_class::<PyVariableLangevinIntegrator>()?;
     module.add_class::<PyVerletIntegrator>()?;
@@ -473,6 +653,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLangevinIntegrator>()?;
     module.add_class::<PyBrownianIntegrator>()?;
     for class in [
+        module.py().get_type::<PyCompoundIntegrator>(),
         module.py().get_type::<PyVariableVerletIntegrator>(),
         module.py().get_type::<PyVariableLangevinIntegrator>(),
         module.py().get_type::<PyVerletIntegrator>(),
@@ -480,6 +661,11 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.py().get_type::<PyBrownianIntegrator>(),
     ] {
         for (snake, camel) in [
+            ("add_integrator", "addIntegrator"),
+            ("get_num_integrators", "getNumIntegrators"),
+            ("get_integrator", "getIntegrator"),
+            ("get_current_integrator", "getCurrentIntegrator"),
+            ("set_current_integrator", "setCurrentIntegrator"),
             ("step_to", "stepTo"),
             ("get_error_tolerance", "getErrorTolerance"),
             ("set_error_tolerance", "setErrorTolerance"),

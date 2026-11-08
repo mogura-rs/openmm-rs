@@ -17,11 +17,12 @@ if [[ "$(uname -s)" == Darwin ]]; then time_flags=(-l); fi
 case "${1:-fixed}" in
     fixed) kinds=(verlet langevin brownian) ;;
     variable) kinds=(variable_verlet variable_langevin) ;;
-    *) echo "Expected fixed or variable" >&2; exit 2 ;;
+    compound) kinds=(compound_verlet compound_langevin) ;;
+    *) echo "Expected fixed, variable or compound" >&2; exit 2 ;;
 esac
 for kind in "${kinds[@]}"; do
     temperatures=(0 300)
-    if [[ "$kind" == verlet || "$kind" == variable_verlet ]]; then temperatures=(0); fi
+    if [[ "$kind" == verlet || "$kind" == variable_verlet || "$kind" == compound_verlet ]]; then temperatures=(0); fi
     for temperature in "${temperatures[@]}"; do
         directory="benchmark-results/stochastic/$kind/$temperature"
         mkdir -p "$directory"

@@ -1,4 +1,5 @@
 pub mod brownian;
+pub mod compound;
 pub mod langevin;
 mod random;
 pub mod variable;
@@ -25,6 +26,8 @@ pub(crate) fn fixed_particles<B: Backend>(masses: &Tensor<B, 1>) -> Tensor<B, 2,
         .expand([n, 3])
 }
 
+pub type IntegratorComponent<B> = std::sync::Arc<std::sync::Mutex<Box<dyn Integrator<B>>>>;
+
 /// Time-stepping algorithm. Operates on raw tensors (nm, nm/ps).
 pub trait Integrator<B: Backend>: Send + Sync {
     /// Initialize internal state when attaching to a Context.
@@ -50,6 +53,28 @@ pub trait Integrator<B: Backend>: Send + Sync {
         forces: &Tensor<B, 2>,
         masses: &Tensor<B, 1>,
     );
+
+    fn selected_integrator(&self) -> Option<usize> {
+        None
+    }
+
+    fn select_integrator(&mut self, _index: usize) -> Result<(), ConstraintError> {
+        Err(ConstraintError(
+            "this integrator has no child selection".into(),
+        ))
+    }
+
+    fn component(&self, _path: &[usize]) -> Option<IntegratorComponent<B>> {
+        None
+    }
+
+    fn set_step_size(&mut self, _value: f64) {
+        panic!("this integrator does not support changing step size");
+    }
+
+    fn set_constraint_tolerance(&mut self, _value: f64) {
+        panic!("this integrator does not support changing constraint tolerance");
+    }
 
     /// Step size in ps.
     fn step_size(&self) -> f64;

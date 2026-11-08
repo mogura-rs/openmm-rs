@@ -245,6 +245,12 @@ macro_rules! adaptive_integrator {
             }
         }
         impl<B: Backend> Integrator<B> for $name {
+            fn set_step_size(&mut self, value: f64) {
+                $name::set_step_size(self, value);
+            }
+            fn set_constraint_tolerance(&mut self, value: f64) {
+                $name::set_constraint_tolerance(self, value);
+            }
             fn initialize(&mut self) {
                 self.initialize_state();
             }

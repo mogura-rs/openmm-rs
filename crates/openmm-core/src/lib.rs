@@ -41,6 +41,7 @@ pub use forces::Force;
 
 // Integrator re-exports.
 pub use integrators::brownian::BrownianIntegrator;
+pub use integrators::compound::CompoundIntegrator;
 pub use integrators::langevin::{LangevinIntegrator, LangevinMiddleIntegrator};
 pub use integrators::verlet::VerletIntegrator;
 pub use integrators::Integrator;

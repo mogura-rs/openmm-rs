@@ -66,6 +66,8 @@ def main():
         note = "Single-process f64 integration with AndersenThermostat at 300 K, 37/ps, dt=0.001 ps, no potential forces and 10 warmup steps. Kinetic energy is checked against a six-standard-deviation equilibrium bound; random paths differ. Optimized CPU/GPU platforms are not measured."
     if all("integrator" in record for rows in groups.values() for record in rows):
         note = "Matched single-process f64 free-particle integration at dt=0.001 ps with 10 warmup steps. Stochastic friction is 0.7/ps. Kinetic energy is checked against the finite-time Gaussian mean and a six-standard-deviation bound. Random paths differ. Optimized CPU/GPU platforms are not measured."
+    if all(record.get("compound_switch_each_step") for rows in groups.values() for record in rows):
+        note += " CompoundIntegrator alternates between two children every step; selection overhead is included."
     if all(record.get("adaptive") for rows in groups.values() for record in rows):
         note += " Adaptive error tolerance is 1e-5 with maximum step 0.001 ps; free particles always select the cap. Reference timing includes per-step clock repair for the supplied kernel bug. The final clock and step count are checked."
     if all(record.get("barostat") for rows in groups.values() for record in rows):

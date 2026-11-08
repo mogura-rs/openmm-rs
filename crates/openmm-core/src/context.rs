@@ -21,7 +21,7 @@ use crate::forces::nonbonded::NonbondedForce;
 use crate::forces::periodic_torsion::PeriodicTorsionForce;
 use crate::forces::rb_torsion::RBTorsionForce;
 use crate::integrators::langevin::BOLTZMANN;
-use crate::integrators::Integrator;
+use crate::integrators::{Integrator, IntegratorComponent};
 use crate::state::{State, StateFlags};
 use crate::system::{validate_box_vectors, System};
 use crate::units::BoxVectors;
@@ -646,7 +646,7 @@ impl<B: Backend> Context<B> {
 
     pub fn try_step(&mut self, steps: usize) -> Result<(), ConstraintError> {
         for _ in 0..steps {
-            self.try_step_once(f64::INFINITY)?;
+            self.try_step_once(f64::INFINITY, None)?;
         }
         Ok(())
     }
@@ -656,8 +656,47 @@ impl<B: Backend> Context<B> {
             .unwrap_or_else(|error| panic!("{error}"));
     }
 
+    pub fn try_step_component(
+        &mut self,
+        path: &[usize],
+        steps: usize,
+    ) -> Result<(), ConstraintError> {
+        if path.is_empty() {
+            return self.try_step(steps);
+        }
+        let component = self
+            .integrator
+            .component(path)
+            .ok_or_else(|| ConstraintError("invalid integrator component path".into()))?;
+        for _ in 0..steps {
+            self.try_step_once(f64::INFINITY, Some(&component))?;
+        }
+        Ok(())
+    }
+
     pub fn try_step_to(&mut self, time: f64) -> Result<(), ConstraintError> {
-        if !self.integrator.supports_step_to() {
+        self.try_step_to_component(&[], time)
+    }
+
+    pub fn try_step_to_component(
+        &mut self,
+        path: &[usize],
+        time: f64,
+    ) -> Result<(), ConstraintError> {
+        let component = if path.is_empty() {
+            None
+        } else {
+            Some(
+                self.integrator
+                    .component(path)
+                    .ok_or_else(|| ConstraintError("invalid integrator component path".into()))?,
+            )
+        };
+        let supported = component.as_ref().map_or_else(
+            || self.integrator.supports_step_to(),
+            |child| child.lock().unwrap().supports_step_to(),
+        );
+        if !supported {
             return Err(ConstraintError(
                 "this integrator does not support step_to".into(),
             ));
@@ -670,8 +709,8 @@ impl<B: Backend> Context<B> {
         while time > self.time {
             let previous = self.time;
             let remaining = time - previous;
-            self.try_step_once(remaining)?;
-            if self.integrator.step_size() == remaining {
+            let dt = self.try_step_once(remaining, component.as_ref())?;
+            if dt == remaining {
                 self.time = time;
             }
             if self.time <= previous {
@@ -683,7 +722,11 @@ impl<B: Backend> Context<B> {
         Ok(())
     }
 
-    fn try_step_once(&mut self, limit: f64) -> Result<(), ConstraintError> {
+    fn try_step_once(
+        &mut self,
+        limit: f64,
+        component: Option<&IntegratorComponent<B>>,
+    ) -> Result<f64, ConstraintError> {
         for index in 0..self.system.forces().len() {
             self.system.forces_mut()[index].update_context_velocities(
                 &mut self.velocities,
@@ -720,9 +763,12 @@ impl<B: Backend> Context<B> {
                 }
             }
         }
-        let (forces, _) =
-            self.calc_forces_and_energy_groups(self.integrator.integration_force_groups());
-        self.integrator.step_with_limit(
+        let child = component.map(|child| child.lock().unwrap());
+        let integrator = child
+            .as_ref()
+            .map_or(self.integrator.as_ref(), |child| child.as_ref());
+        let (forces, _) = self.calc_forces_and_energy_groups(integrator.integration_force_groups());
+        integrator.step_with_limit(
             &mut self.positions,
             &mut self.velocities,
             &forces,
@@ -730,10 +776,12 @@ impl<B: Backend> Context<B> {
             &self.constraints,
             limit,
         )?;
+        let dt = integrator.step_size();
+        drop(child);
         self.compute_virtual_sites();
-        self.time += self.integrator.step_size();
+        self.time += dt;
         self.step_count += 1;
-        Ok(())
+        Ok(dt)
     }
 
     pub fn get_state(&self, flags: StateFlags) -> State<B> {

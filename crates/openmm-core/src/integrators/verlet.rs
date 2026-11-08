@@ -56,6 +56,12 @@ impl VerletIntegrator {
 }
 
 impl<B: Backend> Integrator<B> for VerletIntegrator {
+    fn set_step_size(&mut self, value: f64) {
+        VerletIntegrator::set_step_size(self, value);
+    }
+    fn set_constraint_tolerance(&mut self, value: f64) {
+        VerletIntegrator::set_constraint_tolerance(self, value);
+    }
     fn integration_force_groups(&self) -> u32 {
         self.integration_force_groups
     }

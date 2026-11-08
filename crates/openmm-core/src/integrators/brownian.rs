@@ -99,6 +99,12 @@ impl BrownianIntegrator {
 }
 
 impl<B: Backend> Integrator<B> for BrownianIntegrator {
+    fn set_step_size(&mut self, value: f64) {
+        BrownianIntegrator::set_step_size(self, value);
+    }
+    fn set_constraint_tolerance(&mut self, value: f64) {
+        BrownianIntegrator::set_constraint_tolerance(self, value);
+    }
     fn initialize(&mut self) {
         self.random.initialize();
     }

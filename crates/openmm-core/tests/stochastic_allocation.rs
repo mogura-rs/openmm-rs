@@ -1,7 +1,8 @@
 use burn::{backend::NdArray, tensor::TensorData};
 use openmm_core::{
-    tensor::from_floats, BrownianIntegrator, Context, Integrator, LangevinMiddleIntegrator, System,
-    VariableLangevinIntegrator, VariableVerletIntegrator, VerletIntegrator,
+    tensor::from_floats, BrownianIntegrator, CompoundIntegrator, Context, Integrator,
+    LangevinMiddleIntegrator, System, VariableLangevinIntegrator, VariableVerletIntegrator,
+    VerletIntegrator,
 };
 use std::alloc::{GlobalAlloc, Layout, System as SystemAllocator};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -76,7 +77,10 @@ fn stochastic_cpu_steps_reuse_state_without_dense_temporaries() {
     variable_verlet.set_maximum_step_size(0.001);
     let mut variable_langevin = VariableLangevinIntegrator::new(300., 1., 1e-5);
     variable_langevin.set_maximum_step_size(0.001);
-    let integrators: [Box<dyn Integrator<B>>; 5] = [
+    let mut compound = CompoundIntegrator::<B>::new();
+    compound.add_integrator(Box::new(VerletIntegrator::new(0.001)));
+    let integrators: [Box<dyn Integrator<B>>; 6] = [
+        Box::new(compound),
         Box::new(variable_verlet),
         Box::new(variable_langevin),
         Box::new(VerletIntegrator::new(0.001)),

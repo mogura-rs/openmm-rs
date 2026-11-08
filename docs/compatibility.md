@@ -51,7 +51,7 @@ revision in generated validation results.
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
-| Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
+| Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian and nested CompoundIntegrator have reference comparisons; other integrators and wider statistical validation remain |
 | State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; all four Monte Carlo barostats have CPU implementations and reference fixtures; broader molecular NPT stability and GPU execution remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; integrator settings are shared with the bound Context; broader names/signatures, units and platform selection remain incomplete |
@@ -752,6 +752,79 @@ choose a positive maximum or a finite `stepTo` target for this case. Nonfinite t
 These input-domain checks extend the source's behavior and do not establish full
 error compatibility.
 
+## Compound integration
+
+`CompoundIntegrator` owns multiple child integrators and selects one for ordinary
+Context steps. Compounds can contain other compounds. Step size, constraint
+tolerance and kinetic energy use the selected child; setting integration force
+groups applies recursively to all children. Selecting a different child leaves
+stored velocities unchanged. When algorithms interpret those velocities at
+different time offsets, the caller must adjust them, as required by OpenMM.
+LFMiddle thermal initialization applies a half-step force shift, while its
+kinetic energy uses the stored velocities without a shift.
+Thermal velocity initialization in a compound uses the first child's offset, recursively,
+matching the supplied implementation even when a different child is selected.
+
+A direct `child.step()` integrates that child, including when it is inactive.
+Its force mask and actual step size control the integration. Context state-update
+forces still consult the top-level selected child's settings, and State kinetic
+energy still uses that selection. Adaptive children retain their own step history
+across switches and support `stepTo()` directly. The adaptive clock exception above
+also applies within compounds. Each stochastic child retains its Rust random
+stream; interleaving another child does not consume it. Cross-implementation
+random paths are not promised.
+
+Rust callers use `context.integrator_mut().select_integrator(index)` to change
+the active child, `component(&[parent, child])` to access nested settings, and
+`context.try_step_component(&path, steps)` or `try_step_to_component(&path, time)`
+for direct child execution. Python exposes snake_case and OpenMM camelCase names
+for the compound methods and returns the original child objects. Children have
+one live owner; duplicate ownership, cycles and binding a child independently
+are rejected. Binding checks the whole tree before creating a Context. Weak
+Context links permit collection and rebinding without a reference cycle.
+
+The comparison fixture covers 1,152 states across flat/nested compounds, three
+child orderings, six integrator types, constraints, virtual sites, massless
+particles, force masks, live settings, zero-temperature initialization and direct
+inactive-child execution. Separate tests check state-update routing, bounded
+adaptive clocks, f32 execution, ownership errors and retained random streams.
+The warmed f64 CPU path reuses dense position/velocity storage; compound dispatch
+does not allocate additional particle-sized buffers. Checkpoint serialization,
+unsupported child integrators, full molecular switching protocols and GPU
+execution remain outstanding.
+
+`scripts/benchmark-stochastic.sh compound` alternates between two children every
+step, including selection overhead. Conditions match the free-particle benchmark
+above: f64, dt=0.001 ps, 10 warmup steps, three repetitions, and friction 0.7/ps
+for LFMiddle. The table uses zero-temperature Verlet and 300 K LFMiddle. Throughput
+is the median and RSS the maximum measured process peak, in KiB.
+
+| Child type | Particles | Rust steps/s | Reference steps/s | Rust RSS | Reference RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Verlet | 8 | 1,855,475 | 3,265,720 | 3,836 | 6,920 |
+| Verlet | 4,096 | 43,032 | 10,964 | 4,896 | 7,412 |
+| Verlet | 65,536 | 2,866 | 675 | 16,128 | 20,248 |
+| LFMiddle | 8 | 1,124,090 | 1,365,817 | 4,016 | 7,252 |
+| LFMiddle | 4,096 | 6,121 | 3,601 | 5,192 | 7,732 |
+| LFMiddle | 65,536 | 390 | 226 | 16,408 | 23,628 |
+
+Final time and step count are checked, and kinetic energy must satisfy the
+finite-time Gaussian expectation within six standard deviations. Rust is faster
+and uses less process memory for the two larger sizes. Reference is faster at
+eight particles. This measures free integration and switching overhead; force
+fields, useful switching protocols, long-run stability and optimized OpenMM
+CPU/GPU platforms are outside this benchmark.
+
+### Compound ownership boundary
+
+The supplied header requires adding every child before creating the Context.
+Its `initialize()` does not set the compound's base owner field, so the source's
+`addIntegrator()` guard can incorrectly accept a child afterward, leaving that
+child uninitialized. Rust enforces the documented lifetime and rejects additions
+after the first successful Context binding, including after Context collection.
+This does not reproduce the source's invalid-lifetime behavior. Empty compounds
+raise Python errors when queried or bound instead of dereferencing a missing child.
+
 ## Documentation discrepancies found during implementation
 
 - All four Monte Carlo barostat constructor comments call the rigid scaling center a
@@ -816,6 +889,12 @@ error compatibility.
   particle indices, although Reference rejects changes to bond membership. They
   now reject such updates before modifying the Context. This also preserves the
   connectivity used by lazy molecule construction.
+
+- `CompoundIntegrator.h` calls the collection a `CustomIntegrator` in its
+  introduction, and the source's add-after-binding error repeats that name.
+  Both refer to `CompoundIntegrator`. The header's requirement to add children
+  before Context creation is not enforced by the supplied initialization code;
+  the Rust ownership boundary above enforces it explicitly.
 
 Implementation and reference tests take precedence over outdated descriptions.
 
