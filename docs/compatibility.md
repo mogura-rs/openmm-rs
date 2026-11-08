@@ -49,7 +49,7 @@ revision in generated validation results.
 | Bonded forces | Partial | Harmonic bonds/angles, periodic/RB torsions and CMAP have analytic forces and reference comparisons; broader API validation and GPU execution remain |
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
-| Custom forces | Partial | Six force types use compiled expressions and analytic derivatives; CustomNonbondedForce and CustomCompoundBondForce support six table types; periodic external distances and compound geometric functions are implemented; other force types and broader API coverage remain |
+| Custom forces | Partial | Seven force types use compiled expressions and analytic derivatives; nonbonded, compound and centroid forces support six table types; periodic external distances and compound/centroid geometric functions are implemented; other force types and broader API coverage remain |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | Thin CPU wrappers exist, but the interface is not yet OpenMM-compatible |
@@ -63,10 +63,12 @@ integrator configurations at four time points, forty-one nonbonded configuration
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
 wrapping configurations, six minimization configurations and 184 custom-expression
-states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states and 864 geometric-expression states.
+states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states, 864 geometric-expression states and 864 centroid states.
 Geometric fixtures cover external periodic distances, compound distance/angle/dihedral
 functions, explicit point functions, shared particles, triclinic boxes, nested
 functions, table and bond updates, global parameters, groups and short trajectories.
+Centroid fixtures cover mass/default, explicit and mixed weights, repeated particles,
+overlapping groups, zero weights, massless particles, updates and periodic geometry.
 Custom nonbonded fixtures cover all three methods, switching, overlapping and
 empty interaction groups, computed values, table updates, global changes, box
 changes and long-range corrections. Pair forces and energies use strict double
@@ -84,8 +86,8 @@ for the analytical dispersion coefficient. Runtime offsets affect pair and
 reciprocal terms but do not recompute that coefficient; parameter updates do.
 Group fixtures compare masks including the high bit, direct/reciprocal splitting,
 disabled direct-space terms, restricted integration, forces and kinetic energy.
-Molecular connectivity follows explicit bond forces, constraints and virtual site
-dependencies. Angles, torsions and nonbonded exceptions do not independently join
+Molecular connectivity follows explicit bond forces, centroid bonds, constraints
+and virtual site dependencies. Angles, torsions, compound bonds and nonbonded exceptions do not independently join
 molecules in the supplied reference implementation.
 The minimizer returns its stopping reason, iteration count, physical force RMS
 and constraint error. A constrained stationary point can have nonzero physical
@@ -121,6 +123,11 @@ cutoff; select `CutoffNonPeriodic` or `CutoffPeriodic` explicitly.
 CustomCompoundBondForce supports particle coordinates, distance/angle/dihedral
 functions, explicit point functions, tables and registered parameter derivatives.
 CustomExternalForce supports `periodicdistance` with coordinate chain rules.
+CustomCentroidBondForce normalizes explicit weights or particle masses, evaluates
+the raw weighted centers and redistributes forces with the same normalized weights.
+Periodic geometry applies between centers; it does not unwrap particles within a
+group. Parameter updates retain the Context's group membership and weights while
+updating bond parameters and tables, matching the supplied Reference kernel.
 Geometric angle derivatives retain the reference cross-product norm floor of
 `1e-6`; this regularizes nearly collinear angles and differs from the exact energy
 gradient below that threshold. Coincident-point distance derivatives are zero.
@@ -142,6 +149,10 @@ about 5.12 evaluations/s, versus 5.42 for the earlier implementation and 5.35
 for OpenMM Reference. Most of the initial regression was recovered, but an
 approximately 6% gap to the earlier implementation remains. This benchmark
 does not establish performance against optimized OpenMM CPU or GPU platforms.
+A subsequent ten-evaluation run with compound and centroid support measured
+5.22 evaluations/s for Rust and 5.32 for Reference at the same particle count.
+Process peak RSS was 6,616 KiB and 20,300 KiB, respectively. Short timing runs
+vary; these results do not remove the earlier same-node regression finding.
 
 ## Validation and optimization rules
 
@@ -222,3 +233,15 @@ The reference fixture records this exception separately from the 1,134 matching
 states; it checks that Rust returns the final table value and finite forces.
 Rust also validates periodic endpoint agreement when creating a table, whereas
 the reference defers that check until spline construction in a Context.
+
+## Centroid connectivity exception
+
+The supplied `CustomCentroidBondForceImpl::getBondedParticles()` passes local bond
+positions to `addBondsBetweenGroups()` instead of the bond's group indices. A
+two-group bond using groups 2 and 3 therefore joins groups 0 and 1 in the reference.
+This affects molecular connectivity and molecule-based periodic wrapping.
+Rust joins the groups actually named by the bond. The centroid reference fixture
+records both connectivity results explicitly, while forces, energies and ordinary
+trajectories retain numerical comparisons with the reference. One-group bonds do
+not add molecular connectivity. Group connections use a spanning tree to avoid
+materializing a Cartesian product of particle pairs.

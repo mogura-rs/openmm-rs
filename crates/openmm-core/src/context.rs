@@ -6,6 +6,7 @@ use crate::constraints::{ConstraintError, ConstraintSolver};
 use crate::forces::cmap_torsion::CMAPTorsionForce;
 use crate::forces::custom_angle::CustomAngleForce;
 use crate::forces::custom_bond::CustomBondForce;
+use crate::forces::custom_centroid::CustomCentroidBondForce;
 use crate::forces::custom_compound::CustomCompoundBondForce;
 use crate::forces::custom_external::CustomExternalForce;
 use crate::forces::custom_nonbonded::CustomNonbondedForce;
@@ -61,10 +62,11 @@ impl<B: Backend> Context<B> {
             "cannot create a context for a system with no particles"
         );
         let periodic_box_vectors = system.default_periodic_box_vectors().copied();
+        let masses = system.masses();
         for force in system.forces_mut() {
+            force.initialize_masses(&masses);
             force.initialize(n, periodic_box_vectors.as_ref());
         }
-        let masses = system.masses();
         let virtual_sites = VirtualSitePlan::new(system.virtual_sites(), &masses);
         let molecules = system.molecules();
         let constraints = ConstraintSolver::new(system.constraints(), &masses)
@@ -277,6 +279,25 @@ impl<B: Backend> Context<B> {
             .downcast_mut::<CustomCompoundBondForce>()
             .unwrap_or_else(|| {
                 panic!("force at index {force_index} is not a CustomCompoundBondForce")
+            });
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_custom_centroid_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &CustomCentroidBondForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<CustomCentroidBondForce>()
+            .unwrap_or_else(|| {
+                panic!("force at index {force_index} is not a CustomCentroidBondForce")
             });
         target.update_parameters_from(source);
     }

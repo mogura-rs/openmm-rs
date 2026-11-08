@@ -1,3 +1,5 @@
+mod custom_centroid;
+use custom_centroid::PyCustomCentroidBondForce;
 mod custom_compound;
 use custom_compound::PyCustomCompoundBondForce;
 // Thin pyo3 wrapper. All simulation logic lives in openmm-core.
@@ -1915,6 +1917,9 @@ impl PySystem {
     }
 
     fn add_force(&mut self, force: &Bound<'_, PyAny>) -> PyResult<usize> {
+        if let Ok(force) = force.extract::<PyRef<'_, PyCustomCentroidBondForce>>() {
+            return Ok(self.inner_mut().add_force(Box::new(force.snapshot())));
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomCompoundBondForce>>() {
             return Ok(self.inner_mut().add_force(Box::new(force.snapshot())));
         }
@@ -2142,6 +2147,11 @@ impl PyContext {
         force_index: usize,
         force: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        if let Ok(force) = force.extract::<PyRef<'_, PyCustomCentroidBondForce>>() {
+            self.inner
+                .update_custom_centroid_force_parameters(force_index, &force.snapshot());
+            return Ok(());
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomCompoundBondForce>>() {
             self.inner
                 .update_custom_compound_force_parameters(force_index, &force.snapshot());
@@ -2263,6 +2273,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCustomExternalForce>()?;
     m.add_class::<PyCustomBondForce>()?;
     m.add_class::<PyCustomCompoundBondForce>()?;
+    m.add_class::<PyCustomCentroidBondForce>()?;
     m.add_class::<PyCustomAngleForce>()?;
     m.add_class::<PyCustomNonbondedForce>()?;
     m.add_class::<PyCMAPTorsionForce>()?;

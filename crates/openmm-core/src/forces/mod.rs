@@ -1,6 +1,7 @@
 pub mod cmap_torsion;
 pub mod custom_angle;
 pub mod custom_bond;
+pub mod custom_centroid;
 pub mod custom_compound;
 mod custom_evaluator;
 pub mod custom_external;
@@ -99,6 +100,8 @@ where
 /// Returned forces tensor: shape [N, 3], units kJ/mol/nm.
 /// Returned energy: kJ/mol.
 pub trait Force<B: Backend>: Send + Sync + AsAny + ForceClone<B> {
+    fn initialize_masses(&mut self, _masses: &[f64]) {}
+
     fn initialize(&mut self, _num_particles: usize, _box_vectors: Option<&[[f64; 3]; 3]>) {}
 
     fn force_group(&self) -> u32 {

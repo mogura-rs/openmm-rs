@@ -46,3 +46,5 @@ pub use integrators::verlet::VerletIntegrator;
 pub use integrators::Integrator;
 
 pub use forces::custom_compound::CustomCompoundBondForce;
+
+pub use forces::custom_centroid::CustomCentroidBondForce;
