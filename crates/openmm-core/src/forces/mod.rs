@@ -1,5 +1,6 @@
 pub mod custom_angle;
 pub mod custom_bond;
+mod custom_evaluator;
 pub mod custom_external;
 pub mod custom_nonbonded;
 pub mod custom_torsion;

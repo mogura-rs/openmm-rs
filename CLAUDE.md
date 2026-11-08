@@ -149,7 +149,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - `NonbondedForce` — cutoff/reaction field, Ewald, PME, LJPME, parameter offsets, switching and dispersion correction
 - Virtual sites — averages, out-of-plane, local coordinates, symmetry and nested dependencies
 - Constraints — sparse SHAKE/RATTLE position and velocity projection
-- Custom bond, angle, torsion, external and nonbonded forces — partial expression support
+- Custom bond, angle, torsion, external and nonbonded forces — compiled scalar expressions and analytic derivatives; tabulated/geometric functions remain incomplete
 - Python wrappers — partial snake_case CPU interface
 
 ### Next

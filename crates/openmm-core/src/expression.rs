@@ -1,432 +1,766 @@
-// Expression parser and evaluator for Custom*Force.
-// Supports: +, -, *, /, ^ (right-associative), unary -, parentheses,
-// numeric literals, named variables, and built-in functions.
-//
-// Built-in functions: sin, cos, tan, asin, acos, atan, sqrt, exp, log,
-//                     log10, abs, floor, ceil, step (Heaviside), delta, select
+//! Compiled scalar expressions with reusable reverse-mode differentiation.
 
 use std::collections::HashMap;
 use std::fmt;
 
-// ─── Public API ──────────────────────────────────────────────────────────────
-
-/// Compiled expression ready for repeated evaluation.
 #[derive(Debug, Clone)]
 pub struct Expression {
-    root: Expr,
-    /// Variables referenced by this expression (for caller validation).
+    instructions: Vec<Instruction>,
     pub variables: Vec<String>,
 }
 
-impl Expression {
-    /// Parse a mathematical expression string.
-    pub fn parse(src: &str) -> Result<Self, ParseError> {
-        let tokens = tokenize(src)?;
-        let mut parser = Parser { tokens, pos: 0 };
-        let root = parser.parse_expr(0)?;
-        if parser.pos != parser.tokens.len() {
-            return Err(ParseError::new("unexpected token after expression"));
+#[derive(Debug, Clone)]
+pub struct Workspace {
+    inputs: Vec<f64>,
+    values: Vec<f64>,
+    adjoints: Vec<f64>,
+    gradients: Vec<f64>,
+}
+
+impl Workspace {
+    pub fn set(&mut self, index: Option<usize>, value: f64) {
+        if let Some(index) = index {
+            self.inputs[index] = value;
         }
+    }
+
+    pub fn derivative(&self, index: Option<usize>) -> f64 {
+        index.map_or(0.0, |index| self.gradients[index])
+    }
+}
+
+impl Expression {
+    pub fn parse(src: &str) -> Result<Self, ParseError> {
+        let parts: Vec<_> = src.split(';').collect();
+        let mut definitions = HashMap::new();
+        for definition in parts[1..].iter().rev().filter(|s| !s.trim().is_empty()) {
+            let (name, value) = definition
+                .split_once('=')
+                .ok_or_else(|| ParseError::new("subexpression does not specify a name"))?;
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(ParseError::new("subexpression does not specify a name"));
+            }
+            definitions.insert(name.to_owned(), parse_tree(value, &definitions)?);
+        }
+        let root = parse_tree(parts[0], &definitions)?;
         let mut variables = Vec::new();
         collect_vars(&root, &mut variables);
         variables.sort();
         variables.dedup();
-        Ok(Expression { root, variables })
+        let mut instructions = Vec::new();
+        compile(&root, &variables, &mut instructions, &mut HashMap::new());
+        Ok(Self {
+            instructions,
+            variables,
+        })
     }
 
-    /// Evaluate the expression with a variable binding map.
+    pub fn variable_index(&self, name: &str) -> Option<usize> {
+        self.variables
+            .binary_search_by(|v| v.as_str().cmp(name))
+            .ok()
+    }
+
+    pub fn validate_variables<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), EvalError> {
+        let names: Vec<_> = names.into_iter().collect();
+        for name in &self.variables {
+            if !names.contains(&name.as_str()) {
+                return Err(EvalError(format!("undefined variable: {name}")));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn workspace(&self) -> Workspace {
+        Workspace {
+            inputs: vec![0.0; self.variables.len()],
+            values: vec![0.0; self.instructions.len()],
+            adjoints: vec![0.0; self.instructions.len()],
+            gradients: vec![0.0; self.variables.len()],
+        }
+    }
+
     pub fn compute(&self, vars: &HashMap<&str, f64>) -> Result<f64, EvalError> {
-        compute_node(&self.root, vars)
+        let mut workspace = self.workspace();
+        for (index, name) in self.variables.iter().enumerate() {
+            workspace.inputs[index] = *vars
+                .get(name.as_str())
+                .ok_or_else(|| EvalError(format!("undefined variable: {name}")))?;
+        }
+        Ok(self.evaluate(&mut workspace))
+    }
+
+    /// Evaluate energy and all input derivatives without allocating.
+    pub fn evaluate(&self, workspace: &mut Workspace) -> f64 {
+        assert_eq!(workspace.values.len(), self.instructions.len());
+        for (index, instruction) in self.instructions.iter().enumerate() {
+            workspace.values[index] = match *instruction {
+                Instruction::Literal(bits) => f64::from_bits(bits),
+                Instruction::Variable(input) => workspace.inputs[input],
+                Instruction::Operation(op, args) => op.value(args.map(|a| workspace.values[a])),
+            };
+        }
+        workspace.adjoints.fill(0.0);
+        workspace.gradients.fill(0.0);
+        let last = self.instructions.len() - 1;
+        workspace.adjoints[last] = 1.0;
+        for index in (0..self.instructions.len()).rev() {
+            let adjoint = workspace.adjoints[index];
+            if adjoint == 0.0 {
+                continue;
+            }
+            match self.instructions[index] {
+                Instruction::Variable(input) => workspace.gradients[input] += adjoint,
+                Instruction::Operation(op, args) => {
+                    let values = args.map(|a| workspace.values[a]);
+                    let derivatives = op.derivatives(values, workspace.values[index]);
+                    for i in 0..op.arity() {
+                        if derivatives[i] != 0.0 {
+                            workspace.adjoints[args[i]] += adjoint * derivatives[i];
+                        }
+                    }
+                }
+                Instruction::Literal(_) => {}
+            }
+        }
+        workspace.values[last]
     }
 }
-
-// ─── Error types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct ParseError(String);
-
 impl ParseError {
-    fn new(msg: &str) -> Self {
-        Self(msg.to_string())
+    fn new(message: &str) -> Self {
+        Self(message.to_owned())
     }
 }
-
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "parse error: {}", self.0)
     }
 }
+impl std::error::Error for ParseError {}
 
 #[derive(Debug, Clone)]
 pub struct EvalError(pub String);
-
 impl fmt::Display for EvalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "eval error: {}", self.0)
     }
 }
-
-// ─── AST ─────────────────────────────────────────────────────────────────────
+impl std::error::Error for EvalError {}
 
 #[derive(Debug, Clone)]
 enum Expr {
-    Lit(f64),
-    Var(String),
-    Neg(Box<Expr>),
-    Bin(BinOp, Box<Expr>, Box<Expr>),
-    Call(String, Vec<Expr>),
+    Literal(f64),
+    Variable(String),
+    Operation(Op, Vec<Expr>),
 }
 
-#[derive(Debug, Clone, Copy)]
-enum BinOp {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Instruction {
+    Literal(u64),
+    Variable(usize),
+    Operation(Op, [usize; 3]),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Op {
     Add,
     Sub,
     Mul,
     Div,
     Pow,
+    Neg,
+    Sqrt,
+    Exp,
+    Log,
+    Log10,
+    Sin,
+    Cos,
+    Sec,
+    Csc,
+    Tan,
+    Cot,
+    Asin,
+    Acos,
+    Atan,
+    Atan2,
+    Sinh,
+    Cosh,
+    Tanh,
+    Erf,
+    Erfc,
+    Step,
+    Delta,
+    Square,
+    Cube,
+    Recip,
+    Min,
+    Max,
+    Abs,
+    Floor,
+    Ceil,
+    Select,
+    Eq,
+    Ne,
+    Le,
+    Ge,
+    Lt,
+    Gt,
 }
 
-// ─── Tokenizer ───────────────────────────────────────────────────────────────
+impl Op {
+    fn function(name: &str) -> Result<Self, ParseError> {
+        Ok(match name {
+            "sqrt" => Self::Sqrt,
+            "exp" => Self::Exp,
+            "log" => Self::Log,
+            "log10" => Self::Log10,
+            "sin" => Self::Sin,
+            "cos" => Self::Cos,
+            "sec" => Self::Sec,
+            "csc" => Self::Csc,
+            "tan" => Self::Tan,
+            "cot" => Self::Cot,
+            "asin" => Self::Asin,
+            "acos" => Self::Acos,
+            "atan" => Self::Atan,
+            "atan2" => Self::Atan2,
+            "sinh" => Self::Sinh,
+            "cosh" => Self::Cosh,
+            "tanh" => Self::Tanh,
+            "erf" => Self::Erf,
+            "erfc" => Self::Erfc,
+            "step" => Self::Step,
+            "delta" => Self::Delta,
+            "square" => Self::Square,
+            "cube" => Self::Cube,
+            "recip" => Self::Recip,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            "abs" => Self::Abs,
+            "floor" => Self::Floor,
+            "ceil" => Self::Ceil,
+            "select" => Self::Select,
+            _ => return Err(ParseError::new(&format!("unknown function: {name}"))),
+        })
+    }
+
+    fn arity(self) -> usize {
+        match self {
+            Self::Select => 3,
+            Self::Add
+            | Self::Sub
+            | Self::Mul
+            | Self::Div
+            | Self::Pow
+            | Self::Atan2
+            | Self::Min
+            | Self::Max
+            | Self::Eq
+            | Self::Ne
+            | Self::Le
+            | Self::Ge
+            | Self::Lt
+            | Self::Gt => 2,
+            _ => 1,
+        }
+    }
+
+    fn value(self, [a, b, c]: [f64; 3]) -> f64 {
+        match self {
+            Self::Add => a + b,
+            Self::Sub => a - b,
+            Self::Mul => a * b,
+            Self::Div => a / b,
+            Self::Pow => a.powf(b),
+            Self::Neg => -a,
+            Self::Sqrt => a.sqrt(),
+            Self::Exp => a.exp(),
+            Self::Log => a.ln(),
+            Self::Log10 => a.log10(),
+            Self::Sin => a.sin(),
+            Self::Cos => a.cos(),
+            Self::Sec => 1.0 / a.cos(),
+            Self::Csc => 1.0 / a.sin(),
+            Self::Tan => a.tan(),
+            Self::Cot => 1.0 / a.tan(),
+            Self::Asin => a.asin(),
+            Self::Acos => a.acos(),
+            Self::Atan => a.atan(),
+            Self::Atan2 => a.atan2(b),
+            Self::Sinh => a.sinh(),
+            Self::Cosh => a.cosh(),
+            Self::Tanh => a.tanh(),
+            Self::Erf => libm::erf(a),
+            Self::Erfc => libm::erfc(a),
+            Self::Step => f64::from(a >= 0.0),
+            Self::Delta => f64::from(a == 0.0),
+            Self::Square => a * a,
+            Self::Cube => a * a * a,
+            Self::Recip => 1.0 / a,
+            Self::Min => {
+                if b < a {
+                    b
+                } else {
+                    a
+                }
+            }
+            Self::Max => {
+                if a < b {
+                    b
+                } else {
+                    a
+                }
+            }
+            Self::Abs => a.abs(),
+            Self::Floor => a.floor(),
+            Self::Ceil => a.ceil(),
+            Self::Select => {
+                if a != 0.0 {
+                    b
+                } else {
+                    c
+                }
+            }
+            Self::Eq => f64::from(a - b == 0.0),
+            Self::Ne => 1.0 - f64::from(a - b == 0.0),
+            Self::Le => f64::from(b - a >= 0.0),
+            Self::Ge => f64::from(a - b >= 0.0),
+            Self::Lt => 1.0 - f64::from(a - b >= 0.0),
+            Self::Gt => 1.0 - f64::from(b - a >= 0.0),
+        }
+    }
+
+    fn derivatives(self, [a, b, _]: [f64; 3], value: f64) -> [f64; 3] {
+        let mut result = [0.0; 3];
+        result[0] = match self {
+            Self::Add => {
+                result[1] = 1.0;
+                1.0
+            }
+            Self::Sub => {
+                result[1] = -1.0;
+                1.0
+            }
+            Self::Mul => {
+                result[1] = a;
+                b
+            }
+            Self::Div => {
+                result[1] = -a / (b * b);
+                1.0 / b
+            }
+            Self::Pow => {
+                result[1] = value * a.ln();
+                if b == 0.0 {
+                    0.0
+                } else {
+                    b * a.powf(b - 1.0)
+                }
+            }
+            Self::Neg => -1.0,
+            Self::Sqrt => 0.5 / value,
+            Self::Exp => value,
+            Self::Log => 1.0 / a,
+            Self::Log10 => 1.0 / (a * std::f64::consts::LN_10),
+            Self::Sin => a.cos(),
+            Self::Cos => -a.sin(),
+            Self::Sec => value * a.tan(),
+            Self::Csc => -value / a.tan(),
+            Self::Tan => 1.0 + value * value,
+            Self::Cot => -(1.0 + value * value),
+            Self::Asin => 1.0 / (1.0 - a * a).sqrt(),
+            Self::Acos => -1.0 / (1.0 - a * a).sqrt(),
+            Self::Atan => 1.0 / (1.0 + a * a),
+            Self::Atan2 => {
+                result[1] = -a / (a * a + b * b);
+                b / (a * a + b * b)
+            }
+            Self::Sinh => a.cosh(),
+            Self::Cosh => a.sinh(),
+            Self::Tanh => 1.0 - value * value,
+            Self::Erf => 2.0 / std::f64::consts::PI.sqrt() * (-a * a).exp(),
+            Self::Erfc => -2.0 / std::f64::consts::PI.sqrt() * (-a * a).exp(),
+            Self::Square => 2.0 * a,
+            Self::Cube => 3.0 * a * a,
+            Self::Recip => -1.0 / (a * a),
+            Self::Min => {
+                if a >= b {
+                    result[1] = 1.0;
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            Self::Max => {
+                if a >= b {
+                    1.0
+                } else {
+                    result[1] = 1.0;
+                    0.0
+                }
+            }
+            Self::Abs => {
+                if a >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            }
+            Self::Select => {
+                result[if a != 0.0 { 1 } else { 2 }] = 1.0;
+                0.0
+            }
+            _ => 0.0,
+        };
+        result
+    }
+}
+
+fn collect_vars(expr: &Expr, variables: &mut Vec<String>) {
+    match expr {
+        Expr::Variable(name) => variables.push(name.clone()),
+        Expr::Operation(_, args) => args.iter().for_each(|arg| collect_vars(arg, variables)),
+        _ => {}
+    }
+}
+
+fn compile(
+    expr: &Expr,
+    variables: &[String],
+    instructions: &mut Vec<Instruction>,
+    cache: &mut HashMap<Instruction, usize>,
+) -> usize {
+    let instruction = match expr {
+        Expr::Literal(value) => Instruction::Literal(value.to_bits()),
+        Expr::Variable(name) => Instruction::Variable(variables.binary_search(name).unwrap()),
+        Expr::Operation(op, args) => {
+            let mut indexes = [0; 3];
+            for (index, arg) in args.iter().enumerate() {
+                indexes[index] = compile(arg, variables, instructions, cache);
+            }
+            Instruction::Operation(*op, indexes)
+        }
+    };
+    if let Some(index) = cache.get(&instruction) {
+        return *index;
+    }
+    let index = instructions.len();
+    instructions.push(instruction);
+    cache.insert(instruction, index);
+    index
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    Num(f64),
-    Ident(String),
-    LParen,
-    RParen,
+    Number(f64),
+    Name(String),
+    Operator(String),
+    Left,
+    Right,
     Comma,
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    Caret,
 }
 
 fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
-    let mut tokens = Vec::new();
     let mut chars = src.chars().peekable();
-    while let Some(&c) = chars.peek() {
+    let mut tokens = Vec::new();
+    while let Some(c) = chars.next() {
         match c {
-            ' ' | '\t' | '\n' => {
-                chars.next();
+            c if c.is_whitespace() => {}
+            '(' => tokens.push(Token::Left),
+            ')' => tokens.push(Token::Right),
+            ',' => tokens.push(Token::Comma),
+            '+' | '-' | '*' | '/' | '^' | '=' | '!' | '<' | '>' => {
+                let mut op = c.to_string();
+                if matches!(c, '=' | '!' | '<' | '>') && chars.peek() == Some(&'=') {
+                    op.push(chars.next().unwrap());
+                }
+                if op == "=" || op == "!" {
+                    return Err(ParseError::new("incomplete comparison operator"));
+                }
+                tokens.push(Token::Operator(op));
             }
-            '(' => {
-                chars.next();
-                tokens.push(Token::LParen);
-            }
-            ')' => {
-                chars.next();
-                tokens.push(Token::RParen);
-            }
-            ',' => {
-                chars.next();
-                tokens.push(Token::Comma);
-            }
-            '+' => {
-                chars.next();
-                tokens.push(Token::Plus);
-            }
-            '-' => {
-                chars.next();
-                tokens.push(Token::Minus);
-            }
-            '*' => {
-                chars.next();
-                tokens.push(Token::Star);
-            }
-            '/' => {
-                chars.next();
-                tokens.push(Token::Slash);
-            }
-            '^' => {
-                chars.next();
-                tokens.push(Token::Caret);
-            }
-            '0'..='9' | '.' => {
-                let mut s = String::new();
-                while let Some(&d) = chars.peek() {
-                    if d.is_ascii_digit()
-                        || d == '.'
-                        || d == 'e'
-                        || d == 'E'
-                        || ((d == '+' || d == '-') && s.ends_with(['e', 'E']))
+            c if c.is_ascii_digit() || c == '.' => {
+                let mut number = c.to_string();
+                while let Some(&next) = chars.peek() {
+                    if next.is_ascii_digit()
+                        || matches!(next, '.' | 'e' | 'E')
+                        || (matches!(next, '+' | '-') && number.ends_with(['e', 'E']))
                     {
-                        s.push(d);
-                        chars.next();
+                        number.push(chars.next().unwrap());
                     } else {
                         break;
                     }
                 }
-                let v: f64 = s
-                    .parse()
-                    .map_err(|_| ParseError::new(&format!("bad number: {s}")))?;
-                tokens.push(Token::Num(v));
+                tokens.push(Token::Number(
+                    number
+                        .parse()
+                        .map_err(|_| ParseError::new(&format!("bad number: {number}")))?,
+                ));
             }
-            'a'..='z' | 'A'..='Z' | '_' => {
-                let mut s = String::new();
-                while let Some(&d) = chars.peek() {
-                    if d.is_alphanumeric() || d == '_' {
-                        s.push(d);
-                        chars.next();
-                    } else {
+            c => {
+                let mut name = c.to_string();
+                while let Some(&next) = chars.peek() {
+                    if next.is_whitespace() || "+-*/^=!<>() ,".contains(next) {
                         break;
                     }
+                    name.push(chars.next().unwrap());
                 }
-                tokens.push(Token::Ident(s));
+                tokens.push(Token::Name(name));
             }
-            other => return Err(ParseError::new(&format!("unexpected char: {other}"))),
         }
     }
     Ok(tokens)
 }
 
-// ─── Pratt parser ────────────────────────────────────────────────────────────
+fn parse_tree(src: &str, definitions: &HashMap<String, Expr>) -> Result<Expr, ParseError> {
+    let mut parser = Parser {
+        tokens: tokenize(src)?,
+        position: 0,
+        definitions,
+    };
+    let result = parser.expression(0)?;
+    if parser.position != parser.tokens.len() {
+        return Err(ParseError::new("unexpected token after expression"));
+    }
+    Ok(result)
+}
 
-struct Parser {
+struct Parser<'a> {
     tokens: Vec<Token>,
-    pos: usize,
+    position: usize,
+    definitions: &'a HashMap<String, Expr>,
 }
-
-/// Returns (left_bp, right_bp) for infix operators.
-fn infix_bp(tok: &Token) -> Option<(u8, u8)> {
-    match tok {
-        Token::Plus | Token::Minus => Some((1, 2)),
-        Token::Star | Token::Slash => Some((3, 4)),
-        Token::Caret => Some((6, 5)), // right-associative
-        _ => None,
-    }
-}
-
-impl Parser {
-    fn peek(&self) -> Option<&Token> {
-        self.tokens.get(self.pos)
-    }
-
-    fn next_tok(&mut self) -> Option<&Token> {
-        let t = self.tokens.get(self.pos);
-        self.pos += 1;
-        t
-    }
-
-    fn expect(&mut self, expected: &Token) -> Result<(), ParseError> {
-        match self.next_tok() {
-            Some(t) if t == expected => Ok(()),
-            other => Err(ParseError::new(&format!(
-                "expected {expected:?}, got {other:?}"
-            ))),
-        }
-    }
-
-    fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_atom()?;
-        while let Some((l_bp, r_bp)) = self.peek().and_then(infix_bp) {
-            if l_bp <= min_bp {
-                break;
+impl Parser<'_> {
+    fn expression(&mut self, precedence: u8) -> Result<Expr, ParseError> {
+        let token = self
+            .tokens
+            .get(self.position)
+            .cloned()
+            .ok_or_else(|| ParseError::new("unexpected end of expression"))?;
+        self.position += 1;
+        let mut result = match token {
+            Token::Number(value) => Expr::Literal(value),
+            Token::Operator(op) if op == "-" => Expr::Operation(Op::Neg, vec![self.expression(2)?]),
+            Token::Left => {
+                let result = self.expression(0)?;
+                self.expect(Token::Right)?;
+                result
             }
-
-            let op = match self.next_tok().unwrap() {
-                Token::Plus => BinOp::Add,
-                Token::Minus => BinOp::Sub,
-                Token::Star => BinOp::Mul,
-                Token::Slash => BinOp::Div,
-                Token::Caret => BinOp::Pow,
-                _ => unreachable!(),
-            };
-            let rhs = self.parse_expr(r_bp)?;
-            lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs));
-        }
-        Ok(lhs)
-    }
-
-    fn parse_atom(&mut self) -> Result<Expr, ParseError> {
-        match self.next_tok() {
-            Some(Token::Num(v)) => Ok(Expr::Lit(*v)),
-            Some(Token::Minus) => {
-                let e = self.parse_expr(5)?;
-                Ok(Expr::Neg(Box::new(e)))
-            }
-            Some(Token::LParen) => {
-                let e = self.parse_expr(0)?;
-                self.expect(&Token::RParen)?;
-                Ok(e)
-            }
-            Some(Token::Ident(name)) => {
-                let name = name.clone();
-                if self.peek() == Some(&Token::LParen) {
-                    self.next_tok(); // consume '('
+            Token::Name(name) => {
+                if self.tokens.get(self.position) == Some(&Token::Left) {
+                    self.position += 1;
+                    let op = Op::function(&name)?;
                     let mut args = Vec::new();
-                    while self.peek() != Some(&Token::RParen) {
-                        args.push(self.parse_expr(0)?);
-                        if self.peek() == Some(&Token::Comma) {
-                            self.next_tok();
+                    if self.tokens.get(self.position) != Some(&Token::Right) {
+                        loop {
+                            args.push(self.expression(0)?);
+                            if self.tokens.get(self.position) != Some(&Token::Comma) {
+                                break;
+                            }
+                            self.position += 1;
                         }
                     }
-                    self.expect(&Token::RParen)?;
-                    Ok(Expr::Call(name, args))
+                    self.expect(Token::Right)?;
+                    if args.len() != op.arity() {
+                        return Err(ParseError::new(&format!(
+                            "{name} requires {} arguments",
+                            op.arity()
+                        )));
+                    }
+                    Expr::Operation(op, args)
                 } else {
-                    Ok(Expr::Var(name))
+                    self.definitions
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or(Expr::Variable(name))
                 }
             }
-            other => Err(ParseError::new(&format!("unexpected token: {other:?}"))),
-        }
-    }
-}
-
-// ─── Evaluator ───────────────────────────────────────────────────────────────
-
-fn compute_node(expr: &Expr, vars: &HashMap<&str, f64>) -> Result<f64, EvalError> {
-    match expr {
-        Expr::Lit(v) => Ok(*v),
-        Expr::Var(name) => vars
-            .get(name.as_str())
-            .copied()
-            .ok_or_else(|| EvalError(format!("undefined variable: {name}"))),
-        Expr::Neg(e) => Ok(-compute_node(e, vars)?),
-        Expr::Bin(op, l, r) => {
-            let lv = compute_node(l, vars)?;
-            let rv = compute_node(r, vars)?;
-            Ok(match op {
-                BinOp::Add => lv + rv,
-                BinOp::Sub => lv - rv,
-                BinOp::Mul => lv * rv,
-                BinOp::Div => lv / rv,
-                BinOp::Pow => lv.powf(rv),
-            })
-        }
-        Expr::Call(name, args) => {
-            let argv: Result<Vec<f64>, _> = args.iter().map(|a| compute_node(a, vars)).collect();
-            builtin(name, &argv?)
-        }
-    }
-}
-
-fn builtin(name: &str, args: &[f64]) -> Result<f64, EvalError> {
-    let arg1 = || {
-        args.first()
-            .copied()
-            .ok_or_else(|| EvalError(format!("{name}: requires 1 argument")))
-    };
-    let arg2 = || {
-        if args.len() >= 2 {
-            Ok((args[0], args[1]))
-        } else {
-            Err(EvalError(format!("{name}: requires 2 arguments")))
-        }
-    };
-
-    match name {
-        "sin" => Ok(arg1()?.sin()),
-        "cos" => Ok(arg1()?.cos()),
-        "tan" => Ok(arg1()?.tan()),
-        "asin" => Ok(arg1()?.asin()),
-        "acos" => Ok(arg1()?.acos()),
-        "atan" => Ok(arg1()?.atan()),
-        "atan2" => {
-            let (y, x) = arg2()?;
-            Ok(y.atan2(x))
-        }
-        "sqrt" => Ok(arg1()?.sqrt()),
-        "exp" => Ok(arg1()?.exp()),
-        "log" => Ok(arg1()?.ln()),
-        "log10" => Ok(arg1()?.log10()),
-        "abs" => Ok(arg1()?.abs()),
-        "floor" => Ok(arg1()?.floor()),
-        "ceil" => Ok(arg1()?.ceil()),
-        "min" => {
-            let (a, b) = arg2()?;
-            Ok(a.min(b))
-        }
-        "max" => {
-            let (a, b) = arg2()?;
-            Ok(a.max(b))
-        }
-        // Heaviside: 1 if x >= 0, else 0
-        "step" => Ok(if arg1()? >= 0.0 { 1.0 } else { 0.0 }),
-        // Kronecker delta: 1 if x == 0
-        "delta" => Ok(if arg1()? == 0.0 { 1.0 } else { 0.0 }),
-        // select(cond, if_true, if_false)
-        "select" => {
-            if args.len() < 3 {
-                return Err(EvalError("select: needs 3 arguments".into()));
+            _ => return Err(ParseError::new("unexpected token")),
+        };
+        while let Some(Token::Operator(operator)) = self.tokens.get(self.position) {
+            let (op, level) = match operator.as_str() {
+                "+" => (Op::Add, 0),
+                "-" => (Op::Sub, 0),
+                "*" => (Op::Mul, 1),
+                "/" => (Op::Div, 1),
+                "^" => (Op::Pow, 3),
+                "==" => (Op::Eq, 4),
+                "!=" => (Op::Ne, 4),
+                "<=" => (Op::Le, 4),
+                ">=" => (Op::Ge, 4),
+                "<" => (Op::Lt, 4),
+                ">" => (Op::Gt, 4),
+                _ => unreachable!(),
+            };
+            if level < precedence {
+                break;
             }
-            Ok(if args[0] != 0.0 { args[1] } else { args[2] })
+            self.position += 1;
+            let rhs = self.expression(level + u8::from(op != Op::Pow))?;
+            result = Expr::Operation(op, vec![result, rhs]);
+            // Lepton comparisons return immediately from their precedence level.
+            if level == 4 {
+                return Ok(result);
+            }
         }
-        _ => Err(EvalError(format!("unknown function: {name}"))),
+        Ok(result)
+    }
+
+    fn expect(&mut self, token: Token) -> Result<(), ParseError> {
+        if self.tokens.get(self.position) != Some(&token) {
+            return Err(ParseError::new(&format!("expected {token:?}")));
+        }
+        self.position += 1;
+        Ok(())
     }
 }
-
-fn collect_vars(expr: &Expr, out: &mut Vec<String>) {
-    match expr {
-        Expr::Var(name) => out.push(name.clone()),
-        Expr::Neg(e) => collect_vars(e, out),
-        Expr::Bin(_, l, r) => {
-            collect_vars(l, out);
-            collect_vars(r, out);
-        }
-        Expr::Call(_, args) => args.iter().for_each(|a| collect_vars(a, out)),
-        Expr::Lit(_) => {}
-    }
-}
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn compute(src: &str, vars: &[(&str, f64)]) -> f64 {
-        let expr = Expression::parse(src).unwrap();
-        let map: HashMap<&str, f64> = vars.iter().cloned().collect();
-        expr.compute(&map).unwrap()
+    fn evaluate(src: &str, bindings: &[(&str, f64)]) -> (f64, Vec<f64>) {
+        let expression = Expression::parse(src).unwrap();
+        let mut workspace = expression.workspace();
+        for &(name, value) in bindings {
+            workspace.set(expression.variable_index(name), value);
+        }
+        let value = expression.evaluate(&mut workspace);
+        (
+            value,
+            bindings
+                .iter()
+                .map(|(name, _)| workspace.derivative(expression.variable_index(name)))
+                .collect(),
+        )
     }
 
     #[test]
-    fn test_literals() {
-        assert_eq!(compute("3.14", &[]), 314.0 / 100.0);
-        assert_eq!(compute("1e2", &[]), 100.0);
-    }
-
-    #[test]
-    fn test_arithmetic() {
-        assert_eq!(compute("2 + 3", &[]), 5.0);
-        assert_eq!(compute("10 - 4 * 2", &[]), 2.0);
-        assert_eq!(compute("2^10", &[]), 1024.0);
-        assert!((compute("1/3", &[]) - 1.0 / 3.0).abs() < 1e-15);
-    }
-
-    #[test]
-    fn test_variables() {
-        // k*(r-r0)^2 = 2.0*(1.5-1.0)^2 = 0.5
+    fn precedence_and_definitions() {
+        for (source, expected) in [
+            ("2^3^2", 512.0),
+            ("-2^2", -4.0),
+            ("10-4*2", 2.0),
+            ("2+3<4", 3.0),
+            ("1e2 + .25", 100.25),
+        ] {
+            assert_eq!(evaluate(source, &[]).0, expected, "{source}");
+        }
         assert_eq!(
-            compute("k*(r-r0)^2", &[("k", 2.0), ("r", 1.5), ("r0", 1.0)]),
-            0.5
+            evaluate("a+a; a=b*b; b=x+1;", &[("x", 2.0)]),
+            (18.0, vec![12.0])
         );
+        assert_eq!(
+            Expression::parse("a; b=x; a=b").unwrap().variables,
+            vec!["b"]
+        );
+        assert!(Expression::parse("1<2<3").is_err());
     }
 
     #[test]
-    fn test_functions() {
-        assert!((compute("sqrt(4)", &[]) - 2.0).abs() < 1e-12);
-        assert!((compute("sin(0)", &[]) - 0.0).abs() < 1e-12);
-        assert!((compute("cos(0)", &[]) - 1.0).abs() < 1e-12);
-        assert!((compute("exp(0)", &[]) - 1.0).abs() < 1e-12);
+    fn errors_are_explicit() {
+        for source in [
+            "",
+            "foo(1)",
+            "sin(1,2)",
+            "min(1)",
+            "select(1,2)",
+            "sin(1 2)",
+            "sqrt(",
+            "a; bad",
+        ] {
+            assert!(Expression::parse(source).is_err(), "{source}");
+        }
+        let expression = Expression::parse("x+y").unwrap();
+        assert!(expression.compute(&HashMap::from([("x", 1.0)])).is_err());
+        assert!(expression.validate_variables(["x"]).is_err());
     }
 
     #[test]
-    fn test_unary_minus() {
-        assert_eq!(compute("-3", &[]), -3.0);
-        assert_eq!(compute("-k", &[("k", 2.0)]), -2.0);
+    fn smooth_function_gradients() {
+        for source in [
+            "sin(x)",
+            "cos(x)",
+            "tan(x)",
+            "sec(x)",
+            "csc(x)",
+            "cot(x)",
+            "asin(x)",
+            "acos(x)",
+            "atan(x)",
+            "atan2(x,y)",
+            "sinh(x)",
+            "cosh(x)",
+            "tanh(x)",
+            "exp(x)",
+            "log(x)",
+            "log10(x)",
+            "sqrt(x)",
+            "erf(x)",
+            "erfc(x)",
+            "square(x)",
+            "cube(x)",
+            "recip(x)",
+            "x^y",
+            "x/y",
+            "x*y+x-y",
+            "min(x,y)",
+            "max(x,y)",
+        ] {
+            let (_, derivatives) = evaluate(source, &[("x", 0.4), ("y", 0.7)]);
+            for (i, derivative) in derivatives.into_iter().enumerate() {
+                let mut plus = [("x", 0.4), ("y", 0.7)];
+                let mut minus = plus;
+                plus[i].1 += 1e-6;
+                minus[i].1 -= 1e-6;
+                let numerical = (evaluate(source, &plus).0 - evaluate(source, &minus).0) / 2e-6;
+                assert!(
+                    (derivative - numerical).abs() < 2e-8,
+                    "{source} input {i}: {derivative} vs {numerical}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_step() {
-        assert_eq!(compute("step(-1)", &[]), 0.0);
-        assert_eq!(compute("step(0)", &[]), 1.0);
-        assert_eq!(compute("step(5)", &[]), 1.0);
+    fn branch_derivatives_and_negative_powers() {
+        assert_eq!(
+            evaluate("min(x,y)", &[("x", 1.0), ("y", 1.0)]).1,
+            vec![0.0, 1.0]
+        );
+        assert_eq!(
+            evaluate("max(x,y)", &[("x", 1.0), ("y", 1.0)]).1,
+            vec![1.0, 0.0]
+        );
+        assert_eq!(evaluate("abs(x)", &[("x", 0.0)]).1, vec![1.0]);
+        assert_eq!(
+            evaluate("select(x,sqrt(-1),y^2)", &[("x", 0.0), ("y", 2.0)]),
+            (4.0, vec![0.0, 4.0])
+        );
+        assert_eq!(evaluate("x^3", &[("x", -2.0)]), (-8.0, vec![12.0]));
+        assert_eq!(evaluate("x^0", &[("x", 0.0)]), (1.0, vec![0.0]));
+        for source in [
+            "step(x)", "delta(x)", "floor(x)", "ceil(x)", "x==1", "x!=1", "x<1", "x<=1", "x>1",
+            "x>=1",
+        ] {
+            assert_eq!(evaluate(source, &[("x", 1.0)]).1, vec![0.0], "{source}");
+        }
     }
 
     #[test]
-    fn test_variable_list() {
-        let expr = Expression::parse("k*(r-r0)^2").unwrap();
-        assert_eq!(expr.variables, vec!["k", "r", "r0"]);
+    fn shared_subexpressions_accumulate_gradients() {
+        let expression = Expression::parse("a*a+a; a=x*y").unwrap();
+        assert_eq!(expression.instructions.len(), 5);
+        assert_eq!(
+            evaluate("a*a+a; a=x*y", &[("x", 2.0), ("y", 3.0)]),
+            (42.0, vec![39.0, 26.0])
+        );
     }
 }

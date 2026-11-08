@@ -1,6 +1,7 @@
 // CustomBondForce: user-defined energy as a function of bond distance r.
 // Energy expression may reference r and per-bond parameters.
 // Reference test: openmm/tests/TestCustomBondForce.h
+use super::custom_evaluator::CustomEvaluator;
 use super::Force;
 use crate::expression::Expression;
 use crate::forces::harmonic_bond::apply_minimum_image_ortho;
@@ -162,17 +163,12 @@ impl CustomBondForce {
     }
 }
 
-impl<B: Backend> Force<B> for CustomBondForce {
-    super::force_metadata_impl!();
-    fn bonded_particles(&self) -> Vec<(usize, usize)> {
-        self.bonds.iter().flat_map(|p| [(p.p1, p.p2)]).collect()
-    }
-
-    fn calc_forces_and_energy(
+impl CustomBondForce {
+    fn evaluate<B: Backend>(
         &self,
         positions: &Tensor<B, 2>,
         box_vectors: Option<&[[f64; 3]; 3]>,
-    ) -> (Tensor<B, 2>, f64) {
+    ) -> (Tensor<B, 2>, f64, HashMap<String, f64>) {
         let device = positions.device();
         let n = positions.dims()[0];
         let pos: Vec<f64> = positions
@@ -183,6 +179,13 @@ impl<B: Backend> Force<B> for CustomBondForce {
 
         let mut forces = vec![0.0f64; n * 3];
         let mut energy = 0.0f64;
+        let mut evaluator = CustomEvaluator::new(
+            &self.energy_expr,
+            &self.global_params,
+            self.per_bond_params.iter().map(String::as_str),
+            &["r"],
+            &self.energy_param_deriv_names,
+        );
 
         for bond in &self.bonds {
             let i = bond.p1;
@@ -202,26 +205,10 @@ impl<B: Backend> Force<B> for CustomBondForce {
 
             let r = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
 
-            // Build variable map: r + per-bond params + global params.
-            let mut vars: HashMap<&str, f64> = HashMap::new();
-            vars.insert("r", r);
-            for (name, &val) in &self.global_params {
-                vars.insert(name.as_str(), val);
-            }
-            for (name, &val) in self.per_bond_params.iter().zip(&bond.params) {
-                vars.insert(name.as_str(), val);
-            }
-
-            let e = self.energy_expr.compute(&vars).unwrap_or(0.0);
-            energy += e;
-
-            // Numerical derivative dE/dr, then project onto bond direction.
-            let dr = 1e-5_f64;
-            vars.insert("r", r + dr);
-            let e_plus = self.energy_expr.compute(&vars).unwrap_or(0.0);
-            vars.insert("r", r - dr);
-            let e_minus = self.energy_expr.compute(&vars).unwrap_or(0.0);
-            let de_dr = (e_plus - e_minus) / (2.0 * dr);
+            evaluator.set_coordinates(&[r]);
+            evaluator.set_parameters(bond.params.iter().copied());
+            energy += evaluator.evaluate();
+            let de_dr = evaluator.coordinate_derivative(0);
 
             let f_over_r = de_dr / r;
             for d in 0..3 {
@@ -234,7 +221,38 @@ impl<B: Backend> Force<B> for CustomBondForce {
         let forces_tensor =
             crate::tensor::from_floats::<B, 1>(forces.as_slice(), &device).reshape([n, 3]);
 
-        (forces_tensor, energy)
+        (forces_tensor, energy, evaluator.finish())
+    }
+}
+
+impl<B: Backend> Force<B> for CustomBondForce {
+    fn initialize(&mut self, num_particles: usize, _box_vectors: Option<&[[f64; 3]; 3]>) {
+        let _ = CustomEvaluator::new(
+            &self.energy_expr,
+            &self.global_params,
+            self.per_bond_params.iter().map(String::as_str),
+            &["r"],
+            &self.energy_param_deriv_names,
+        );
+        for record in &self.bonds {
+            assert!(
+                [record.p1, record.p2].iter().all(|&p| p < num_particles),
+                "custom force particle index out of range"
+            );
+        }
+    }
+    super::force_metadata_impl!();
+    fn bonded_particles(&self) -> Vec<(usize, usize)> {
+        self.bonds.iter().flat_map(|p| [(p.p1, p.p2)]).collect()
+    }
+
+    fn calc_forces_and_energy(
+        &self,
+        positions: &Tensor<B, 2>,
+        box_vectors: Option<&[[f64; 3]; 3]>,
+    ) -> (Tensor<B, 2>, f64) {
+        let (forces, energy, _) = self.evaluate::<B>(positions, box_vectors);
+        (forces, energy)
     }
 
     fn uses_periodic_boundary_conditions(&self) -> bool {
@@ -260,24 +278,7 @@ impl<B: Backend> Force<B> for CustomBondForce {
         positions: &Tensor<B, 2>,
         box_vectors: Option<&[[f64; 3]; 3]>,
     ) -> HashMap<String, f64> {
-        let mut derivatives = HashMap::new();
-        let step = 1e-6;
-        for name in &self.energy_param_deriv_names {
-            let value = *self
-                .global_params
-                .get(name)
-                .expect("unknown global parameter");
-            let mut plus = self.clone();
-            plus.global_params.insert(name.clone(), value + step);
-            let energy_plus = Force::<B>::calc_forces_and_energy(&plus, positions, box_vectors).1;
-
-            let mut minus = self.clone();
-            minus.global_params.insert(name.clone(), value - step);
-            let energy_minus = Force::<B>::calc_forces_and_energy(&minus, positions, box_vectors).1;
-
-            derivatives.insert(name.clone(), (energy_plus - energy_minus) / (2.0 * step));
-        }
-        derivatives
+        self.evaluate::<B>(positions, box_vectors).2
     }
 }
 

@@ -1,6 +1,8 @@
 // CustomNonbondedForce: user-defined pairwise energy as a function of r
 // and per-particle parameters.
 // Reference test: openmm/tests/TestCustomNonbondedForce.h
+use super::custom_evaluator::CustomEvaluator;
+use super::neighbors::NeighborCells;
 use super::Force;
 use crate::expression::Expression;
 use crate::forces::harmonic_bond::apply_minimum_image_ortho;
@@ -20,6 +22,8 @@ pub struct CustomNonbondedForce {
     energy_param_deriv_names: Vec<String>,
     use_pbc: bool,
     cutoff_distance: Option<f64>,
+    use_neighbor_cells: bool,
+    neighbor_cells: NeighborCells,
 }
 
 impl CustomNonbondedForce {
@@ -37,6 +41,8 @@ impl CustomNonbondedForce {
             energy_param_deriv_names: Vec::new(),
             use_pbc: false,
             cutoff_distance: None,
+            use_neighbor_cells: true,
+            neighbor_cells: NeighborCells::default(),
         })
     }
 
@@ -150,7 +156,15 @@ impl CustomNonbondedForce {
         self.use_pbc
     }
 
+    pub fn set_use_neighbor_cells(&mut self, enabled: bool) {
+        self.use_neighbor_cells = enabled;
+    }
+
     pub fn set_cutoff_distance(&mut self, cutoff: f64) {
+        assert!(
+            cutoff.is_finite() && cutoff > 0.0,
+            "cutoff distance must be positive and finite"
+        );
         self.cutoff_distance = Some(cutoff);
     }
 
@@ -178,13 +192,12 @@ impl CustomNonbondedForce {
     }
 }
 
-impl<B: Backend> Force<B> for CustomNonbondedForce {
-    super::force_metadata_impl!();
-    fn calc_forces_and_energy(
+impl CustomNonbondedForce {
+    fn evaluate<B: Backend>(
         &self,
         positions: &Tensor<B, 2>,
         box_vectors: Option<&[[f64; 3]; 3]>,
-    ) -> (Tensor<B, 2>, f64) {
+    ) -> (Tensor<B, 2>, f64, HashMap<String, f64>) {
         let device = positions.device();
         let n = positions.dims()[0];
         let pos: Vec<f64> = positions
@@ -195,64 +208,67 @@ impl<B: Backend> Force<B> for CustomNonbondedForce {
 
         let mut forces = vec![0.0f64; n * 3];
         let mut energy = 0.0f64;
+        let mut evaluator = CustomEvaluator::new(
+            &self.energy_expr,
+            &self.global_params,
+            self.paired_parameter_names
+                .iter()
+                .flatten()
+                .map(String::as_str),
+            &["r"],
+            &self.energy_param_deriv_names,
+        );
 
         let excluded: std::collections::HashSet<(usize, usize)> =
             self.exclusions.iter().cloned().collect();
         let cutoff2 = self.cutoff_distance.map(|c| c * c);
-        let mut vars: HashMap<&str, f64> = HashMap::with_capacity(
-            1 + self.global_params.len() + 2 * self.paired_parameter_names.len(),
-        );
-        for (name, &value) in &self.global_params {
-            vars.insert(name.as_str(), value);
-        }
+        let mut pair = |i: usize, j: usize| {
+            let key = (i, j);
+            if excluded.contains(&key) {
+                return;
+            }
 
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let key = (i, j);
-                if excluded.contains(&key) {
-                    continue;
+            let mut delta = [
+                pos[j * 3] - pos[i * 3],
+                pos[j * 3 + 1] - pos[i * 3 + 1],
+                pos[j * 3 + 2] - pos[i * 3 + 2],
+            ];
+            if self.use_pbc {
+                if let Some(bv) = box_vectors {
+                    apply_minimum_image_ortho(&mut delta, bv);
                 }
+            }
 
-                let mut delta = [
-                    pos[j * 3] - pos[i * 3],
-                    pos[j * 3 + 1] - pos[i * 3 + 1],
-                    pos[j * 3 + 2] - pos[i * 3 + 2],
-                ];
-                if self.use_pbc {
-                    if let Some(bv) = box_vectors {
-                        apply_minimum_image_ortho(&mut delta, bv);
-                    }
-                }
+            let r2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
+            if cutoff2.map(|c2| r2 >= c2).unwrap_or(false) {
+                return;
+            }
+            let r = r2.sqrt();
 
-                let r2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
-                if cutoff2.map(|c2| r2 >= c2).unwrap_or(false) {
-                    continue;
-                }
-                let r = r2.sqrt();
+            evaluator.set_coordinates(&[r]);
+            evaluator.set_parameters(
+                self.particles[i]
+                    .iter()
+                    .zip(&self.particles[j])
+                    .flat_map(|(&a, &b)| [a, b]),
+            );
+            energy += evaluator.evaluate();
+            let de_dr = evaluator.coordinate_derivative(0);
 
-                vars.insert("r", r);
-                let pi = &self.particles[i];
-                let pj = &self.particles[j];
-                for (idx, names) in self.paired_parameter_names.iter().enumerate() {
-                    vars.insert(names[0].as_str(), pi[idx]);
-                    vars.insert(names[1].as_str(), pj[idx]);
-                }
-
-                energy += self.energy_expr.compute(&vars).unwrap_or(0.0);
-
-                // Numerical dE/dr.
-                let dr = 1e-5_f64;
-                vars.insert("r", r + dr);
-                let ep = self.energy_expr.compute(&vars).unwrap_or(0.0);
-                vars.insert("r", r - dr);
-                let em = self.energy_expr.compute(&vars).unwrap_or(0.0);
-                let de_dr = (ep - em) / (2.0 * dr);
-
-                let f_over_r = de_dr / r;
-                for d in 0..3 {
-                    let f = f_over_r * delta[d];
-                    forces[i * 3 + d] += f;
-                    forces[j * 3 + d] -= f;
+            let f_over_r = de_dr / r;
+            for d in 0..3 {
+                let f = f_over_r * delta[d];
+                forces[i * 3 + d] += f;
+                forces[j * 3 + d] -= f;
+            }
+        };
+        if let Some(cutoff) = self.cutoff_distance.filter(|_| self.use_neighbor_cells) {
+            self.neighbor_cells
+                .visit(&pos, cutoff, box_vectors.filter(|_| self.use_pbc), pair);
+        } else {
+            for i in 0..n {
+                for j in i + 1..n {
+                    pair(i, j);
                 }
             }
         }
@@ -260,7 +276,37 @@ impl<B: Backend> Force<B> for CustomNonbondedForce {
         (
             crate::tensor::from_floats::<B, 1>(forces.as_slice(), &device).reshape([n, 3]),
             energy,
+            evaluator.finish(),
         )
+    }
+}
+
+impl<B: Backend> Force<B> for CustomNonbondedForce {
+    fn initialize(&mut self, num_particles: usize, _box_vectors: Option<&[[f64; 3]; 3]>) {
+        let _ = CustomEvaluator::new(
+            &self.energy_expr,
+            &self.global_params,
+            self.paired_parameter_names
+                .iter()
+                .flatten()
+                .map(String::as_str),
+            &["r"],
+            &self.energy_param_deriv_names,
+        );
+        assert_eq!(
+            self.particles.len(),
+            num_particles,
+            "custom nonbonded particle count must match system"
+        );
+    }
+    super::force_metadata_impl!();
+    fn calc_forces_and_energy(
+        &self,
+        positions: &Tensor<B, 2>,
+        box_vectors: Option<&[[f64; 3]; 3]>,
+    ) -> (Tensor<B, 2>, f64) {
+        let (forces, energy, _) = self.evaluate::<B>(positions, box_vectors);
+        (forces, energy)
     }
 
     fn uses_periodic_boundary_conditions(&self) -> bool {
@@ -286,23 +332,6 @@ impl<B: Backend> Force<B> for CustomNonbondedForce {
         positions: &Tensor<B, 2>,
         box_vectors: Option<&[[f64; 3]; 3]>,
     ) -> HashMap<String, f64> {
-        let mut derivatives = HashMap::new();
-        let step = 1e-6;
-        for name in &self.energy_param_deriv_names {
-            let value = *self
-                .global_params
-                .get(name)
-                .expect("unknown global parameter");
-            let mut plus = self.clone();
-            plus.global_params.insert(name.clone(), value + step);
-            let energy_plus = Force::<B>::calc_forces_and_energy(&plus, positions, box_vectors).1;
-
-            let mut minus = self.clone();
-            minus.global_params.insert(name.clone(), value - step);
-            let energy_minus = Force::<B>::calc_forces_and_energy(&minus, positions, box_vectors).1;
-
-            derivatives.insert(name.clone(), (energy_plus - energy_minus) / (2.0 * step));
-        }
-        derivatives
+        self.evaluate::<B>(positions, box_vectors).2
     }
 }

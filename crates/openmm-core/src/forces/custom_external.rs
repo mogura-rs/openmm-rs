@@ -1,5 +1,6 @@
 // CustomExternalForce: user-defined energy per particle as a function of (x, y, z).
 // Reference test: openmm/tests/TestCustomExternalForce.h
+use super::custom_evaluator::CustomEvaluator;
 use super::Force;
 use crate::expression::Expression;
 use burn::prelude::*;
@@ -139,13 +140,12 @@ impl CustomExternalForce {
     }
 }
 
-impl<B: Backend> Force<B> for CustomExternalForce {
-    super::force_metadata_impl!();
-    fn calc_forces_and_energy(
+impl CustomExternalForce {
+    fn evaluate<B: Backend>(
         &self,
         positions: &Tensor<B, 2>,
         _box_vectors: Option<&[[f64; 3]; 3]>,
-    ) -> (Tensor<B, 2>, f64) {
+    ) -> (Tensor<B, 2>, f64, HashMap<String, f64>) {
         let device = positions.device();
         let n = positions.dims()[0];
         let pos: Vec<f64> = positions
@@ -156,6 +156,13 @@ impl<B: Backend> Force<B> for CustomExternalForce {
 
         let mut forces = vec![0.0f64; n * 3];
         let mut energy = 0.0f64;
+        let mut evaluator = CustomEvaluator::new(
+            &self.energy_expr,
+            &self.global_params,
+            self.per_particle_params.iter().map(String::as_str),
+            &["x", "y", "z"],
+            &self.energy_param_deriv_names,
+        );
 
         for rec in &self.particles {
             let i = rec.index;
@@ -163,35 +170,46 @@ impl<B: Backend> Force<B> for CustomExternalForce {
             let y = pos[i * 3 + 1];
             let z = pos[i * 3 + 2];
 
-            let mut vars: HashMap<&str, f64> = HashMap::new();
-            vars.insert("x", x);
-            vars.insert("y", y);
-            vars.insert("z", z);
-            for (name, &val) in &self.global_params {
-                vars.insert(name.as_str(), val);
-            }
-            for (name, &val) in self.per_particle_params.iter().zip(&rec.params) {
-                vars.insert(name.as_str(), val);
-            }
-
-            energy += self.energy_expr.compute(&vars).unwrap_or(0.0);
-
-            // Numerical gradient dE/dx, dE/dy, dE/dz.
-            let dr = 1e-5_f64;
-            for (d, coord) in ["x", "y", "z"].iter().enumerate() {
-                vars.insert(coord, [x, y, z][d] + dr);
-                let ep = self.energy_expr.compute(&vars).unwrap_or(0.0);
-                vars.insert(coord, [x, y, z][d] - dr);
-                let em = self.energy_expr.compute(&vars).unwrap_or(0.0);
-                vars.insert(coord, [x, y, z][d]); // restore
-                forces[i * 3 + d] -= (ep - em) / (2.0 * dr);
+            evaluator.set_coordinates(&[x, y, z]);
+            evaluator.set_parameters(rec.params.iter().copied());
+            energy += evaluator.evaluate();
+            for axis in 0..3 {
+                forces[i * 3 + axis] -= evaluator.coordinate_derivative(axis);
             }
         }
 
         (
             crate::tensor::from_floats::<B, 1>(forces.as_slice(), &device).reshape([n, 3]),
             energy,
+            evaluator.finish(),
         )
+    }
+}
+
+impl<B: Backend> Force<B> for CustomExternalForce {
+    fn initialize(&mut self, num_particles: usize, _box_vectors: Option<&[[f64; 3]; 3]>) {
+        let _ = CustomEvaluator::new(
+            &self.energy_expr,
+            &self.global_params,
+            self.per_particle_params.iter().map(String::as_str),
+            &["x", "y", "z"],
+            &self.energy_param_deriv_names,
+        );
+        for record in &self.particles {
+            assert!(
+                [record.index].iter().all(|&p| p < num_particles),
+                "custom force particle index out of range"
+            );
+        }
+    }
+    super::force_metadata_impl!();
+    fn calc_forces_and_energy(
+        &self,
+        positions: &Tensor<B, 2>,
+        _box_vectors: Option<&[[f64; 3]; 3]>,
+    ) -> (Tensor<B, 2>, f64) {
+        let (forces, energy, _) = self.evaluate::<B>(positions, _box_vectors);
+        (forces, energy)
     }
 
     fn uses_periodic_boundary_conditions(&self) -> bool {
@@ -217,24 +235,7 @@ impl<B: Backend> Force<B> for CustomExternalForce {
         positions: &Tensor<B, 2>,
         box_vectors: Option<&[[f64; 3]; 3]>,
     ) -> HashMap<String, f64> {
-        let mut derivatives = HashMap::new();
-        let step = 1e-6;
-        for name in &self.energy_param_deriv_names {
-            let value = *self
-                .global_params
-                .get(name)
-                .expect("unknown global parameter");
-            let mut plus = self.clone();
-            plus.global_params.insert(name.clone(), value + step);
-            let energy_plus = Force::<B>::calc_forces_and_energy(&plus, positions, box_vectors).1;
-
-            let mut minus = self.clone();
-            minus.global_params.insert(name.clone(), value - step);
-            let energy_minus = Force::<B>::calc_forces_and_energy(&minus, positions, box_vectors).1;
-
-            derivatives.insert(name.clone(), (energy_plus - energy_minus) / (2.0 * step));
-        }
-        derivatives
+        self.evaluate::<B>(positions, box_vectors).2
     }
 }
 

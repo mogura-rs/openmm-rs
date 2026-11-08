@@ -49,7 +49,7 @@ revision in generated validation results.
 | Bonded forces | Partial | Reference coverage, CMAP, GPU execution |
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
-| Custom forces | Partial | Five force types and a scalar expression evaluator exist; broader API and numerical validation remain |
+| Custom forces | Partial | Five force types use compiled scalar expressions, shared subexpressions and analytic coordinate/parameter derivatives; tabulated/geometric functions, other force types and broader API coverage remain |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | Thin CPU wrappers exist, but the interface is not yet OpenMM-compatible |
@@ -62,7 +62,8 @@ runs C++ fixtures against the Rust Python extension. Current fixtures cover seve
 integrator configurations at four time points, forty-one nonbonded configurations,
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
-wrapping configurations and six minimization configurations.
+wrapping configurations, six minimization configurations and 184 custom-expression
+states with forces and parameter derivatives.
 Nonbonded fixtures include Ewald, electrostatic/dispersion PME, neutral and charged
 systems, exceptions, runtime offsets, parameter updates and periodic box changes.
 Mesh parameters are fixed when a Context is initialized, as in the reference.
@@ -83,12 +84,23 @@ For double-precision Rust input, use `openmm_core::tensor::from_floats` or expli
 through f32 regardless of the backend type; the crate helper preserves the selected
 backend precision. Existing f32 backend code remains supported.
 
+Scalar custom expressions support all standard Lepton scalar functions, comparisons
+with the supplied parser's precedence, and semicolon definitions evaluated from
+right to left. Function arity and unknown variables are rejected explicitly.
+Reverse-mode derivatives reuse buffers within each force evaluation; interactions
+do not allocate variable maps or use numerical differences. `log10` remains a Rust
+extension. Tabulated functions and geometry functions such as `periodicdistance`
+are not yet supported. A constant NaN in an unselected branch can prevent the
+supplied Lepton optimizer from terminating because NaN is unequal to itself.
+Reference fixtures therefore use defined scalar domains; Rust separately checks
+that unselected branches do not contaminate derivatives.
+
 Pass fixture names to select a focused reference run, for example
 `scripts/validate-reference.sh virtual_sites minimizer`. With no arguments, the
 script runs all fixtures. Minimized endpoints are compared after convergence;
 the iteration-limited fixture separately verifies stopping after one iteration.
-Use `scripts/benchmark-cpu.sh` after reference validation to compare exhaustive
-and cell traversal with the OpenMM Reference platform. It records process peak
+Use `scripts/benchmark-cpu.sh` and `scripts/benchmark-custom.sh` after reference validation to compare exhaustive
+and cell traversal with the OpenMM Reference platform. They record process peak
 RSS and timing; optimized OpenMM CPU/GPU performance is a separate requirement.
 
 ## Validation and optimization rules
@@ -128,6 +140,13 @@ belong under ignored directories.
 - The original periodic/custom torsion comments described analytic forces and
   momentum conservation, but the force signs and middle-particle terms did not
   match the energy gradient. Both now share a validated analytic geometry helper.
+
+- The original expression type claimed to be compiled, but recursively evaluated
+  its syntax tree, matched function names at runtime and allocated argument lists.
+  It now executes indexed instructions with reusable reverse-mode buffers.
+
+- The validation and benchmark documentation invoked shell scripts directly, but
+  those scripts lacked executable permissions. Both entry points are now executable.
 
 Implementation and reference tests take precedence over outdated descriptions.
 
