@@ -154,6 +154,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - `CustomIntegrator` — programmable steps, nested flow control, scalar/vector expressions, custom kinetic energy and persistent group caches
 - CPU stochastic integration — direct f64 state updates and per-integrator seeded random streams
 - `CustomGBForce` — multistage computed values, reverse chain derivatives, table updates and reusable cutoff cells
+- `LCPOForce` — surface overlap terms, analytic forces, reusable contact graphs and triangle traversal
 - `GBSAOBCForce` — OBC-II solvation, ACE surface energy, cutoff cells, triclinic boxes and live particle updates
 - `NonbondedForce` — cutoff/reaction field, Ewald, PME, LJPME, parameter offsets, switching and dispersion correction
 - Virtual sites — averages, out-of-plane, local coordinates, symmetry and nested dependencies

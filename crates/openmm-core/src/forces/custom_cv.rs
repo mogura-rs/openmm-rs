@@ -394,6 +394,7 @@ pub(crate) fn update_force_parameters<B: Backend>(
     update!(crate::RBTorsionForce);
     update!(crate::NonbondedForce);
     update!(crate::GBSAOBCForce);
+    update!(crate::LCPOForce);
     update!(crate::CustomGBForce);
     update!(crate::CustomExternalForce);
     update!(crate::CustomBondForce);

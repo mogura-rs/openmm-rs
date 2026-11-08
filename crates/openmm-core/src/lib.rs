@@ -36,6 +36,7 @@ pub use forces::custom_torsion::CustomTorsionForce;
 pub use forces::gbsa_obc::{GBSAOBCForce, GBSAOBCMethod, GBSAParticle};
 pub use forces::harmonic_angle::HarmonicAngleForce;
 pub use forces::harmonic_bond::HarmonicBondForce;
+pub use forces::lcpo::{LCPOForce, LCPOParticle};
 pub use forces::nonbonded::{NonbondedForce, NonbondedMethod};
 pub use forces::periodic_torsion::PeriodicTorsionForce;
 pub use forces::rb_torsion::RBTorsionForce;

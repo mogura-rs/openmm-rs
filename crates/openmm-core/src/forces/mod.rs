@@ -21,6 +21,7 @@ pub mod flexible_barostat;
 pub mod gbsa_obc;
 pub mod harmonic_angle;
 pub mod harmonic_bond;
+pub mod lcpo;
 pub mod membrane_barostat;
 mod neighbors;
 pub mod nonbonded;

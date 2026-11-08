@@ -51,6 +51,7 @@ revision in generated validation results.
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Eleven force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond, GB and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Implicit solvation | Partial | GBSA-OBC and programmable CustomGB support polar/surface forces, three cutoff methods, particle updates, cell traversal and nested CV use; application parameter assignment and resident GPU execution remain |
+| Surface area | Partial | LCPO overlap energies, analytic forces, periodic distances and parameter updates are implemented; application parameter assignment and resident GPU execution remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator, Nose-Hoover chains, DPD, QTB and programmable CustomIntegrator have reference comparisons; checkpointing, resident GPU integration and wider molecular validation remain |
 | State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; all four Monte Carlo barostats have CPU implementations and reference fixtures; broader molecular NPT stability and GPU execution remain |
@@ -1523,6 +1524,69 @@ checks candidate completeness and duplicate absence against brute force,
 including translated coordinates. This correction applies to every force using
 the shared neighbor cells.
 
+## LCPO surface potential
+
+`LCPOForce` implements the one-, two- and three-body overlap terms, surface
+tension, zero-radius exclusion, optional periodic distances and parameter updates.
+Radii include any solvent probe radius chosen by the caller; the force does not
+add one. Surface tension has units kJ/mol/nm^2, and the fourth LCPO coefficient
+has units nm^-2. A particle with zero coefficients and positive radius still
+occludes other particles. The algebraic overlap formula is retained even for
+fully contained spheres, matching Reference without additional clipping.
+
+Each active contact stores its two directed overlap areas and radial derivatives.
+A compact adjacency array identifies triangles; each unordered triangle is visited
+once and contributes all six directed terms. Reverse area adjoints then produce
+the pair forces. Storage scales with particles and actual contacts, without a
+dense particle-pair matrix or a map per particle. Dense configurations can still
+have quadratically many contacts. Warm host force accumulation reuses its buffers;
+an owned force tensor allocates one output buffer. Noncoincident active particle
+positions are required because the LCPO overlap formula contains inverse distance.
+
+Parameter updates reload particle values, surface tension and the periodic flag,
+matching the Reference kernel's complete reinitialization. Force group and name
+remain those captured by the Context. The search cutoff is twice the largest
+radius, while each actual contact must satisfy `r < radius_i + radius_j`.
+The periodic box check follows the Reference evaluation-time tolerance.
+
+Four Rust tests cover coordinate gradients, nonperiodic/triclinic geometry,
+periodic images, containment, exact tangency, zero radius versus zero coefficients,
+parameter updates and f32. A 4,096-particle allocation regression checks sparse
+contact storage and warm force-buffer reuse. The reference fixture adds 768 states
+covering four system sizes, positive/negative surface tension, zero coefficients
+and radii, force groups, nested CVs, massless particles, virtual sites, updates,
+box changes and short trajectories. Twelve configurations also compare forces
+with 252 independent finite differences of source energies. Across 237,312
+state comparisons, the largest absolute differences were `1.93e-9` kJ/mol in
+energy and `2.48e-10` kJ/mol/nm in force. The largest finite-difference force
+error was `8.73e-10` kJ/mol/nm.
+
+The five-ps conservation fixture uses eight particles with harmonic bonds and a
+0.2-fs step, in both nonperiodic and triclinic periodic conditions. Every pair
+remains inside its overlap boundary. This condition matters because changes in
+the overlap graph can switch three-body terms abruptly. The largest energy change
+over 5 ps was `4.91e-6` kJ/mol in both
+implementations; final position and velocity differences were below `1.09e-11`
+in nm and nm/ps. These short model systems do not establish conservation for
+arbitrary boundary crossings or biomolecular sampling convergence.
+
+`scripts/benchmark-lcpo.sh` compares 512, 2,048 and 8,192 particles on a 0.3-nm
+lattice, with radii from 0.20 to 0.28 nm, coefficients `(0.7,-0.2,0.08,0.1)` and
+unit surface tension. Nonperiodic and periodic conditions use one warmup and
+three processes each. Energy and squared force norm are checked across
+implementations. Timings exclude construction, while process RSS includes Context
+storage, reusable workspaces and runtime overhead. This is a surface-potential
+benchmark, not complete force-field throughput or GPU execution.
+
+| Geometry | Particles | Rust evaluations/s | Reference evaluations/s | Rust peak RSS KiB | Reference peak RSS KiB |
+|---|---:|---:|---:|---:|---:|
+| Nonperiodic | 512 | 707.007 | 179.084 | 3,756 | 7,500 |
+| Nonperiodic | 2,048 | 155.305 | 36.842 | 5,328 | 9,928 |
+| Nonperiodic | 8,192 | 38.542 | 8.574 | 11,516 | 20,268 |
+| Periodic | 512 | 302.482 | 98.112 | 4,124 | 7,968 |
+| Periodic | 2,048 | 74.067 | 25.452 | 5,480 | 10,632 |
+| Periodic | 8,192 | 24.481 | 5.913 | 11,524 | 21,092 |
+
 ## Documentation discrepancies found during implementation
 
 - All four Monte Carlo barostat constructor comments call the rigid scaling center a
@@ -1630,6 +1694,10 @@ the shared neighbor cells.
 - Its deprecated function comments refer to `getTabulatedFunctionParameters()`
   and `setTabulatedFunctionParameters()`, which are not members of the class.
   The actual object API is `getTabulatedFunction().get/setFunctionParameters()`.
+
+- `LCPOForce.h` limits Context updates to surface tension and particle parameters.
+  The supplied Reference kernel reinitializes its full interaction and also
+  reloads the periodic-boundary flag. Rust follows that implementation.
 
 Implementation and reference tests take precedence over outdated descriptions.
 
