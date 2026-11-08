@@ -1,4 +1,5 @@
 use crate::forces::alignment::{OrientationRestraintForce, RMSDForce};
+use crate::forces::barostat::{scaled_box, volume, MonteCarloBarostat, BAR_NM3_TO_KJ_PER_MOL};
 use crate::forces::custom_cv::{update_force_parameters, CustomCVForce};
 // Context owns the mutable simulation state and drives the MD loop.
 // Generic over burn Backend: NdArray (CPU), Wgpu (GPU), Cuda.
@@ -44,6 +45,7 @@ pub struct Context<B: Backend> {
     virtual_sites: VirtualSitePlan,
     molecules: OnceLock<Vec<Vec<usize>>>,
     empty_forces: OnceLock<Tensor<B, 2>>,
+    box_update_positions: Option<Tensor<B, 2>>,
 }
 
 impl<B: Backend> Context<B> {
@@ -68,6 +70,14 @@ impl<B: Backend> Context<B> {
             "cannot create a context for a system with no particles"
         );
         let periodic_box_vectors = system.default_periodic_box_vectors().copied();
+        assert!(
+            system.uses_periodic_boundary_conditions()
+                || !system
+                    .forces()
+                    .iter()
+                    .any(|force| force.requires_periodic_system()),
+            "a barostat cannot be used with a non-periodic system"
+        );
         let masses = system.masses();
         let constraint_definitions = system.constraints().to_vec();
         for force in system.forces_mut() {
@@ -113,6 +123,7 @@ impl<B: Backend> Context<B> {
             virtual_sites,
             molecules: OnceLock::new(),
             empty_forces: OnceLock::new(),
+            box_update_positions: None,
         }
     }
 
@@ -635,13 +646,42 @@ impl<B: Backend> Context<B> {
 
     pub fn try_step(&mut self, steps: usize) -> Result<(), ConstraintError> {
         for _ in 0..steps {
-            for force in self.system.forces_mut() {
-                force.update_context_velocities(
+            for index in 0..self.system.forces().len() {
+                self.system.forces_mut()[index].update_context_velocities(
                     &mut self.velocities,
                     &self.host_masses,
                     self.integrator.step_size(),
                     self.step_count,
                 );
+                if let Some(vectors) = self.periodic_box_vectors {
+                    let proposal =
+                        self.system.forces_mut()[index].propose_context_box_update(&vectors);
+                    if let Some(proposal) = proposal {
+                        let groups = self.integrator.integration_force_groups();
+                        let old_energy = self.energy_at(&self.positions, &vectors, groups);
+                        let positions = self.prepare_scaled_positions(
+                            proposal.transform,
+                            proposal.scale_molecules_as_rigid,
+                        );
+                        let new_energy = self.energy_at(&positions, &proposal.box_vectors, groups);
+                        let scaled_particles = if proposal.scale_molecules_as_rigid {
+                            self.molecules().len()
+                        } else {
+                            self.system.num_particles()
+                        };
+                        if self.system.forces_mut()[index].accept_context_box_update(
+                            &proposal,
+                            new_energy - old_energy,
+                            scaled_particles,
+                        ) {
+                            self.box_update_positions =
+                                Some(std::mem::replace(&mut self.positions, positions));
+                            self.periodic_box_vectors = Some(proposal.box_vectors);
+                        } else {
+                            self.box_update_positions = Some(positions);
+                        }
+                    }
+                }
             }
             let (forces, _) =
                 self.calc_forces_and_energy_groups(self.integrator.integration_force_groups());
@@ -669,6 +709,154 @@ impl<B: Backend> Context<B> {
 
     pub fn molecules(&self) -> &[Vec<usize>] {
         self.molecules.get_or_init(|| self.system.molecules())
+    }
+
+    fn energy_at(&self, positions: &Tensor<B, 2>, vectors: &BoxVectors, groups: u32) -> f64 {
+        self.system
+            .forces()
+            .iter()
+            .filter_map(|force| {
+                force
+                    .calc_forces_and_energy_groups(positions, Some(vectors), groups)
+                    .map(|(_, energy)| energy)
+            })
+            .sum()
+    }
+
+    fn scaled_positions(&self, transform: [[f64; 3]; 3], rigid: bool) -> Tensor<B, 2> {
+        let mut positions = crate::tensor::to_f64_vec(&self.positions);
+        self.transform_positions(&mut positions, transform, rigid);
+        crate::tensor::from_f64_vec(positions, self.positions.dims(), &self.device)
+    }
+
+    fn prepare_scaled_positions(&mut self, transform: [[f64; 3]; 3], rigid: bool) -> Tensor<B, 2> {
+        let Some(mut target) = self.box_update_positions.take() else {
+            return self.scaled_positions(transform, rigid);
+        };
+        if crate::tensor::with_mut_ndarray_f64(&mut target, |values| {
+            crate::tensor::with_f64_data(&self.positions, |source| values.copy_from_slice(source));
+            self.transform_positions(values, transform, rigid);
+        })
+        .is_some()
+        {
+            target
+        } else {
+            self.scaled_positions(transform, rigid)
+        }
+    }
+
+    fn transform_positions(
+        &self,
+        positions: &mut [f64],
+        mut transform: [[f64; 3]; 3],
+        rigid: bool,
+    ) {
+        if rigid {
+            for (axis, row) in transform.iter_mut().enumerate() {
+                row[axis] -= 1.0;
+            }
+        }
+        let diagonal = transform[0][1] == 0.0
+            && transform[0][2] == 0.0
+            && transform[1][0] == 0.0
+            && transform[1][2] == 0.0
+            && transform[2][0] == 0.0
+            && transform[2][1] == 0.0;
+        let deform = |point: [f64; 3]| {
+            if diagonal {
+                [
+                    transform[0][0] * point[0],
+                    transform[1][1] * point[1],
+                    transform[2][2] * point[2],
+                ]
+            } else {
+                transform.map(|row| row.iter().zip(point).map(|(a, b)| a * b).sum::<f64>())
+            }
+        };
+        if rigid {
+            for molecule in self.molecules() {
+                let mut center = [0.0; 3];
+                for &atom in molecule {
+                    for axis in 0..3 {
+                        center[axis] += positions[3 * atom + axis];
+                    }
+                }
+                let inverse_count = 1.0 / molecule.len() as f64;
+                for value in &mut center {
+                    *value *= inverse_count;
+                }
+                let offset = deform(center);
+                for &atom in molecule {
+                    for axis in 0..3 {
+                        positions[3 * atom + axis] += offset[axis];
+                    }
+                }
+            }
+        } else {
+            for position in positions.chunks_exact_mut(3) {
+                let scaled = deform([position[0], position[1], position[2]]);
+                position.copy_from_slice(&scaled);
+            }
+        }
+    }
+
+    pub fn compute_current_pressure(&self, force_index: usize) -> Result<f64, String> {
+        let barostat = self
+            .system
+            .forces()
+            .get(force_index)
+            .and_then(|force| force.as_any().downcast_ref::<MonteCarloBarostat>())
+            .ok_or_else(|| "force index does not identify a MonteCarloBarostat".to_owned())?;
+        let vectors = self
+            .periodic_box_vectors
+            .as_ref()
+            .ok_or_else(|| "a barostat requires a periodic box".to_owned())?;
+        let rigid = barostat.scale_molecules_as_rigid();
+        let energy = |scale: f64| {
+            let transform = [[scale, 0.0, 0.0], [0.0, scale, 0.0], [0.0, 0.0, scale]];
+            let positions = self.scaled_positions(transform, rigid);
+            self.energy_at(
+                &positions,
+                &scaled_box(vectors, scale),
+                self.integrator.integration_force_groups(),
+            )
+        };
+        let difference = energy(1.001) - energy(0.999);
+        let kinetic = crate::tensor::with_f64_data(&self.velocities, |velocities| {
+            if rigid {
+                self.molecules()
+                    .iter()
+                    .map(|molecule| {
+                        let mut momentum = [0.0; 3];
+                        let mut mass = 0.0;
+                        for &atom in molecule {
+                            mass += self.host_masses[atom];
+                            for axis in 0..3 {
+                                momentum[axis] +=
+                                    self.host_masses[atom] * velocities[3 * atom + axis];
+                            }
+                        }
+                        if mass == 0.0 {
+                            0.0
+                        } else {
+                            0.5 * momentum.iter().map(|p| p * p).sum::<f64>() / mass
+                        }
+                    })
+                    .sum::<f64>()
+            } else {
+                self.host_masses
+                    .iter()
+                    .zip(velocities.chunks_exact(3))
+                    .map(|(mass, v)| 0.5 * mass * v.iter().map(|x| x * x).sum::<f64>())
+                    .sum()
+            }
+        });
+        let current_volume = volume(vectors);
+        let delta_volume = current_volume * (1.001_f64.powi(3) - 0.999_f64.powi(3));
+        Ok(
+            ((2.0 / 3.0) * kinetic / current_volume - difference / delta_volume)
+                / BAR_NM3_TO_KJ_PER_MOL,
+        )
     }
 
     pub fn get_state_options(

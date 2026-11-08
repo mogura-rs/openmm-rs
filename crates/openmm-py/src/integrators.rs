@@ -291,6 +291,20 @@ pub(crate) fn create_context(
     let py = integrator.py();
     let (core, link) = prepare(integrator)?;
     let snapshot = system.borrow(py).snapshot(py)?;
+    if !snapshot.uses_periodic_boundary_conditions()
+        && snapshot
+            .forces()
+            .iter()
+            .any(|force| force.requires_periodic_system())
+    {
+        return Err(err("a barostat cannot be used with a non-periodic system"));
+    }
+    let force_objects = system
+        .borrow(py)
+        .force_objects
+        .iter()
+        .map(|force| force.clone_ref(py))
+        .collect();
     let inner = Rc::new(RefCell::new(Context::new(
         snapshot,
         core,
@@ -301,6 +315,7 @@ pub(crate) fn create_context(
         inner,
         system,
         integrator: integrator.clone().unbind(),
+        force_objects,
     })
 }
 

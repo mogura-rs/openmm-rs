@@ -5,13 +5,13 @@ cd "$(dirname "$0")/.."
 reference_source="${OPENMM_SOURCE:-../openmm}"
 reference_build="target/reference-openmm"
 jobs="${SLURM_CPUS_PER_TASK:-4}"
-fixtures=(integrators nonbonded virtual_sites bonded groups molecules minimizer custom tables cmap custom_nonbonded geometry centroid hbond collective cv cm_motion andersen ownership integrator_binding)
+fixtures=(integrators nonbonded virtual_sites bonded groups molecules minimizer custom tables cmap custom_nonbonded geometry centroid hbond collective cv cm_motion andersen ownership integrator_binding barostat)
 if [[ $# -gt 0 ]]; then
     fixtures=("$@")
 fi
 for fixture in "${fixtures[@]}"; do
     case "$fixture" in
-        integrators|nonbonded|virtual_sites|bonded|groups|molecules|minimizer|custom|tables|cmap|custom_nonbonded|geometry|centroid|hbond|collective|cv|cm_motion|andersen|ownership|integrator_binding) ;;
+        integrators|nonbonded|virtual_sites|bonded|groups|molecules|minimizer|custom|tables|cmap|custom_nonbonded|geometry|centroid|hbond|collective|cv|cm_motion|andersen|ownership|integrator_binding|barostat) ;;
         *) echo "Unknown reference fixture: $fixture" >&2; exit 2 ;;
     esac
 done
@@ -41,10 +41,18 @@ done
 export PYO3_PYTHON
 PYO3_PYTHON="$(uv run --no-project python -c 'import sys; print(sys.executable)')"
 export CARGO_TARGET_DIR=target/reference-rust
-cargo build --locked -p openmm-py --jobs "$jobs"
-extension="$CARGO_TARGET_DIR/debug/libopenmm.so"
+profile="${OPENMM_RS_PROFILE:-release}"
+build_flags=()
+case "$profile" in
+    release) build_flags=(--release) ;;
+    debug) ;;
+    *) echo "Unknown Rust validation profile: $profile" >&2; exit 2 ;;
+esac
+cargo build --locked -p openmm-py --jobs "$jobs" "${build_flags[@]}"
+printf '%s\n' "$profile" > validation-results/rust-profile.txt
+extension="$CARGO_TARGET_DIR/$profile/libopenmm.so"
 if [[ "$(uname -s)" == Darwin ]]; then
-    extension="$CARGO_TARGET_DIR/debug/libopenmm.dylib"
+    extension="$CARGO_TARGET_DIR/$profile/libopenmm.dylib"
 fi
 for fixture in "${fixtures[@]}"; do
     case "$fixture" in

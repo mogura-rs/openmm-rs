@@ -55,5 +55,6 @@ pub use forces::alignment::{OrientationRestraintForce, RGForce, RMSDForce};
 pub use forces::custom_volume::CustomVolumeForce;
 
 pub use forces::andersen::AndersenThermostat;
+pub use forces::barostat::MonteCarloBarostat;
 pub use forces::cm_motion::CMMotionRemover;
 pub use forces::custom_cv::CustomCVForce;

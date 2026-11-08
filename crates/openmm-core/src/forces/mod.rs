@@ -1,5 +1,6 @@
 pub mod alignment;
 pub mod andersen;
+pub mod barostat;
 pub mod cm_motion;
 pub mod cmap_torsion;
 pub mod custom_angle;
@@ -127,6 +128,26 @@ where
 /// Returned forces tensor: shape [N, 3], units kJ/mol/nm.
 /// Returned energy: kJ/mol.
 pub trait Force<B: Backend>: Send + Sync + AsAny + ForceClone<B> {
+    fn requires_periodic_system(&self) -> bool {
+        false
+    }
+
+    fn propose_context_box_update(
+        &mut self,
+        _box_vectors: &crate::units::BoxVectors,
+    ) -> Option<barostat::BoxScaleProposal> {
+        None
+    }
+
+    fn accept_context_box_update(
+        &mut self,
+        _proposal: &barostat::BoxScaleProposal,
+        _energy_change: f64,
+        _scaled_particles: usize,
+    ) -> bool {
+        false
+    }
+
     fn initialize_masses(&mut self, _masses: &[f64]) {}
 
     fn initialize_constraints(

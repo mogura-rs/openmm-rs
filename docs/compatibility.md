@@ -52,7 +52,7 @@ revision in generated validation results.
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
-| State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; barostats remain |
+| State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; isotropic Monte Carlo pressure control is implemented; anisotropic, membrane and flexible barostats remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; integrator settings are shared with the bound Context; broader names/signatures, units and platform selection remain incomplete |
 | Precision | Partial | CPU core supports f32 and f64; Python uses f64. GPU precision modes remain unverified |
@@ -60,7 +60,9 @@ revision in generated validation results.
 | Performance | In progress | Finite-cutoff pairs use reusable cell storage, PME reuses FFT plans/workspace, and dispersion uses linear-time moments; force tensors still allocate and transfer host data |
 
 `scripts/validate-reference.sh` builds the external OpenMM Reference library and
-runs C++ fixtures against the Rust Python extension. Current fixtures cover seven
+runs C++ fixtures against the Rust Python extension. Both libraries use release
+builds by default; set `OPENMM_RS_PROFILE=debug` for a debug Rust extension. The
+selected Rust profile is recorded with the generated results. Current fixtures cover seven
 integrator configurations at four time points, forty-one nonbonded configurations,
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
@@ -101,11 +103,56 @@ integrators, constraints, force groups, massless particles and parameter changes
 Statistical tests separately check the collision probability, transitive groups,
 normalized first/second/fourth velocity moments and mass scaling.
 
+MonteCarloBarostat proposes uniform changes in volume, scales all box vectors
+isotropically and accepts using the energy difference, pressure work and the
+Jacobian for coordinate scaling. Rigid scaling translates each molecule by the change
+in its unweighted coordinate centroid; atomic scaling moves every particle,
+including massless particles. Coordinates are used as stored, without molecule
+unwrapping. Accepted volume moves leave velocities unchanged. Proposed coordinates
+are evaluated separately, so rejection preserves the current positions and box.
+The f64 CPU path reuses one proposal buffer, swaps it with the active positions
+on acceptance and preserves retained State snapshots through copy-on-write. The
+buffer is allocated only when a volume move first needs it. Single precision and
+other backends retain tensor construction. Instantaneous-pressure queries use
+temporary coordinate storage and do not change the Context cache.
+The proposal width adapts to the observed acceptance fraction, matching Reference.
+
+State updates run in System order, independently of force-group masks. Barostat
+energies use the integrator's selected force groups, including separate reciprocal
+PME groups. Its schedule uses an internal counter rather than the Context step
+count. Frequency changes take effect in existing Contexts; zero disables moves.
+Default temperature and pressure affect new Contexts; the named Context parameters
+change a running simulation. Random streams capture their seed at initialization
+and are independent between Rust Contexts. Nonzero seeds reproduce Rust paths;
+seed zero uses OS entropy. Cross-implementation paths differ.
+
+Instantaneous pressure uses molecular or atomic kinetic energy from the stored
+velocities and a central finite difference of potential energy at length scales
+1.001 and 0.999. Molecular kinetic energy uses mass-weighted momentum, while
+coordinate scaling uses unweighted centroids. It does not apply the integrator's
+kinetic-energy time shift or recompute virtual sites during the volume probe,
+matching Reference. The query preserves coordinates, velocities, box, clock and
+step count. Python pressure queries identify the original force retained when the
+Context was created; later System edits do not change that lookup.
+
+The pressure fixtures cover 324 states with unequal and zero masses, constraints,
+virtual sites, triclinic boxes, changed globals, volume energies, PME direct and
+reciprocal groups, and short trajectories. Another 60 states compare disabled and
+changed frequencies independently of Context step counts. Statistical checks use
+128 free atoms, connected into 64 diatomic molecules, and a volume potential
+`q*V` with `q = 0.2 kJ/mol/nm^3`. Both implementations sample the first and second
+volume moments in rigid and atomic modes, separately testing the gamma law with
+shape `Nscaled + 1` and scale `kT/(P + q)`, with pressure expressed as energy per
+volume. Each run discards 10,000 steps, then uses forty blocks of 5,000 steps,
+recording a volume every twenty steps. Each mean must lie within six block standard
+errors of its analytic expectation. These checks test configurational sampling;
+they do not establish long-run molecular NPT stability or thermostat equilibration.
+
 Python System objects retain the original force objects and expose `get_force`,
 `get_forces` and `remove_force`. Context creation snapshots the current definitions,
 including nested CV children and shared tables. Definition edits affect new
 Contexts; existing Contexts retain their captured settings until an explicit
-parameter update. A force can belong to only one System or CustomCVForce, and
+parameter update. The barostat frequency is a live setting, as described above. A force can belong to only one System or CustomCVForce, and
 failed additions leave ownership and force lists unchanged. Reference fixtures
 compare 288 states across repeated Context creation, bond membership, groups,
 periodicity, masses, tables, nested CV parameters and thermostat defaults.
@@ -327,8 +374,8 @@ At 13,824 particles, the three-repetition measurements were:
 
 RSS is the maximum across the three processes. These results use the scripted
 coordinate workload and the Reference platform; they do not establish GPU or
-optimized OpenMM CPU performance. The current code passed all 20 reference
-fixtures with 513,719 scalar comparisons, 126 Rust tests and a build with the
+optimized OpenMM CPU performance. The current code passed all 21 reference
+fixtures with 532,247 scalar comparisons, 135 Rust tests and a build with the
 default backend feature disabled.
 
 `scripts/benchmark-cv.sh` measures a weighted mean of disjoint RG selections,
@@ -373,6 +420,39 @@ their tensor paths. Molecular connectivity is constructed lazily when requested
 or needed for periodic wrapping; invalid bonded indices are still rejected at
 Context initialization. These measurements cover this thermostat workload on the
 Reference platform, not optimized CPU/GPU platforms or molecular force fields.
+
+`scripts/benchmark-barostat.sh` measures complete Verlet steps with an isotropic
+volume move on every step, at 20 bar and 300 K. Zero-strength bonds define diatomic
+molecules, and the integration mask excludes potential forces. This isolates
+coordinate scaling and Context overhead. The script starts at the ideal-gas mean
+volume, uses 100 warmup steps and checks the final volume against a six-standard-
+deviation bound. It measures 20,000, 2,000 and 300 steps at 512, 4,096 and 65,536
+atoms, with three process repetitions for every case.
+
+| Scaling | Atoms | Rust median steps/s | Reference median steps/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Rigid | 512 | 138,020 | 42,349 | 3,976 | 7,232 |
+| Rigid | 4,096 | 18,973 | 5,011 | 5,132 | 8,548 |
+| Rigid | 65,536 | 1,335 | 313 | 23,892 | 29,800 |
+| Atomic | 512 | 194,941 | 41,900 | 4,048 | 7,264 |
+| Atomic | 4,096 | 24,494 | 5,012 | 4,880 | 8,620 |
+| Atomic | 65,536 | 1,887 | 312 | 21,000 | 31,244 |
+
+RSS is the maximum across the three processes. The first implementation reached
+1,001 rigid and 1,346 atomic steps/s at 65,536 atoms. Reusing proposal storage and
+specializing diagonal coordinate transforms improved throughput. Keeping the
+buffer increased peak RSS by about 1.6 MiB in the rigid case, which exposed
+additional copies in the final harmonic-bond energy/force query. Harmonic bonds
+now borrow f64 CPU coordinates and transfer their output vector directly into
+shared tensor storage. An allocation regression permits only the output force
+array. A separate check verifies zero new dense arrays during warmed volume moves;
+a retained State snapshot requires at most one copy-on-write array.
+
+This benchmark covers coordinate updates and the Reference platform. Molecular
+force-field throughput, optimized CPU/GPU platforms and equilibrium convergence
+require separate measurements. Barostat trial energies still evaluate force
+kernels that return both energy and forces; dedicated energy-only kernels remain
+performance work.
 
 ## Validation and optimization rules
 
@@ -449,6 +529,10 @@ Verlet is about 6% slower in this measurement, while the larger cases improve.
 Small-system overhead remains optimization work.
 
 ## Documentation discrepancies found during implementation
+
+- The MonteCarloBarostat constructor comment calls the rigid scaling center a
+  center of mass. The Reference kernel instead uses the unweighted centroid,
+  consistent with that class's getter/setter documentation. Rust follows the code.
 
 - The original Verlet header called its update velocity Verlet, but the stored
   velocity and update equations implement leapfrog. The header now names leapfrog.
@@ -547,3 +631,19 @@ records both connectivity results explicitly, while forces, energies and ordinar
 trajectories retain numerical comparisons with the reference. One-group bonds do
 not add molecular connectivity. Group connections use a spanning tree to avoid
 materializing a Cartesian product of particle pairs.
+
+## Barostat compatibility exceptions
+
+Rigid versus atomic scaling is captured at Context creation in Rust, for both
+coordinate changes and the Jacobian particle count. In the supplied Reference
+snapshot, changing this setting afterward changes only the particle count; the
+coordinate kernel keeps its original mode. Rust retains a consistent captured mode.
+Create a new Context to apply a changed mode.
+
+Nonpositive proposed volumes are rejected before computing a box scale. The
+supplied Reference implementation instead evaluates a fractional power of a
+negative volume ratio, producing nonfinite box vectors and an exception. A seeded
+32-atom, 16-molecule ideal-gas probe reproduced this after 35,111 completed steps: the current
+volume was about 12.27 nm^3 and the proposal half-width about 13.69 nm^3. The regular
+statistical fixtures use 128 atoms. A separate Rust regression tests rejection of
+nonpositive proposals after a large external reduction of box volume.

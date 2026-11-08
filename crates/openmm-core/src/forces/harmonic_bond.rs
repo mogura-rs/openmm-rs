@@ -106,48 +106,41 @@ impl<B: Backend> Force<B> for HarmonicBondForce {
     ) -> (Tensor<B, 2>, f64) {
         let device = positions.device();
         let n = positions.dims()[0];
-        let pos: Vec<f64> = positions
-            .to_data()
-            .convert::<f64>()
-            .to_vec::<f64>()
-            .unwrap();
+        crate::tensor::with_f64_data(positions, |pos| {
+            let mut forces = vec![0.0f64; n * 3];
+            let mut energy = 0.0f64;
 
-        let mut forces = vec![0.0f64; n * 3];
-        let mut energy = 0.0f64;
+            for bond in &self.bonds {
+                let i = bond.particle1;
+                let j = bond.particle2;
 
-        for bond in &self.bonds {
-            let i = bond.particle1;
-            let j = bond.particle2;
+                let mut delta = [
+                    pos[j * 3] - pos[i * 3],
+                    pos[j * 3 + 1] - pos[i * 3 + 1],
+                    pos[j * 3 + 2] - pos[i * 3 + 2],
+                ];
 
-            let mut delta = [
-                pos[j * 3] - pos[i * 3],
-                pos[j * 3 + 1] - pos[i * 3 + 1],
-                pos[j * 3 + 2] - pos[i * 3 + 2],
-            ];
+                if self.use_pbc {
+                    if let Some(bv) = box_vectors {
+                        apply_minimum_image_ortho(&mut delta, bv);
+                    }
+                }
 
-            if self.use_pbc {
-                if let Some(bv) = box_vectors {
-                    apply_minimum_image_ortho(&mut delta, bv);
+                let r = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+                let dr = r - bond.length;
+
+                energy += 0.5 * bond.k * dr * dr;
+
+                let f_mag = bond.k * dr / r;
+                for d in 0..3 {
+                    let f = f_mag * delta[d];
+                    forces[i * 3 + d] += f;
+                    forces[j * 3 + d] -= f;
                 }
             }
 
-            let r = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
-            let dr = r - bond.length;
-
-            energy += 0.5 * bond.k * dr * dr;
-
-            let f_mag = bond.k * dr / r;
-            for d in 0..3 {
-                let f = f_mag * delta[d];
-                forces[i * 3 + d] += f;
-                forces[j * 3 + d] -= f;
-            }
-        }
-
-        let forces_tensor =
-            crate::tensor::from_floats::<B, 1>(forces.as_slice(), &device).reshape([n, 3]);
-
-        (forces_tensor, energy)
+            (crate::tensor::from_f64_vec(forces, [n, 3], &device), energy)
+        })
     }
 
     fn uses_periodic_boundary_conditions(&self) -> bool {

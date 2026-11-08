@@ -22,6 +22,8 @@ def main():
                 expected = 1.5 * record["particles"] * (1.380649e-23*6.02214076e23/1000) * 300
                 tolerance = 6 * expected * math.sqrt(2 / (3 * record["particles"]))
             assert abs(record["kinetic_energy"]-expected) < tolerance, record
+        if record.get("barostat"):
+            assert record["volume"] > 0 and abs(record["volume"]-record["expected_volume"]) < 6*record["volume_stddev"], record
         memory_path = path.with_suffix(".memory.txt")
         for line in memory_path.read_text().splitlines():
             if "Maximum resident set size (kbytes):" in line:
@@ -53,6 +55,8 @@ def main():
         note = "Single-process f64 integration with AndersenThermostat at 300 K, 37/ps, dt=0.001 ps, no potential forces and 10 warmup steps. Kinetic energy is checked against a six-standard-deviation equilibrium bound; random paths differ. Optimized CPU/GPU platforms are not measured."
     if all("integrator" in record for rows in groups.values() for record in rows):
         note = "Matched single-process f64 free-particle integration at dt=0.001 ps with 10 warmup steps. Stochastic friction is 0.7/ps. Kinetic energy is checked against the finite-time Gaussian mean and a six-standard-deviation bound. Random paths differ. Optimized CPU/GPU platforms are not measured."
+    if all(record.get("barostat") for rows in groups.values() for record in rows):
+        note = "Matched f64 isotropic volume moves every Verlet step at 20 bar and 300 K, with 100 warmup steps. Zero-strength bonds define diatomic molecules; integration force groups exclude potential forces. Initial volume is the ideal-gas mean; the final volume must remain within six equilibrium standard deviations. Random paths differ. This measures coordinate-scaling and Context overhead, not force-field throughput or equilibrium convergence. Optimized CPU/GPU platforms are not measured."
     result = {"note": note, "cases": groups, "summary": summaries}
     (directory / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
