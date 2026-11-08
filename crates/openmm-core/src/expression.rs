@@ -18,6 +18,7 @@ enum GeometryMode {
     None,
     External,
     Particles(char, usize),
+    Hbond,
 }
 
 impl GeometryMode {
@@ -27,8 +28,62 @@ impl GeometryMode {
             Self::Particles(_, _) if name != "periodicdistance" => {
                 GeometryFunction::from_name(name)
             }
+            Self::Hbond => name
+                .strip_prefix('\0')
+                .and_then(GeometryFunction::from_name),
             _ => None,
         }
+    }
+    fn symbolic_function(self, name: &str, args: &[Expr]) -> Result<Option<Expr>, ParseError> {
+        if !matches!(self, Self::Particles(_, _) | Self::Hbond)
+            || !matches!(name, "distance" | "angle" | "dihedral")
+        {
+            return Ok(None);
+        }
+        let expected = match name {
+            "distance" => 2,
+            "angle" => 3,
+            _ => 4,
+        };
+        if args.len() != expected {
+            return Err(ParseError::new(&format!(
+                "{name} requires {expected} particles"
+            )));
+        }
+        let internal = if matches!(self, Self::Hbond) {
+            "\0"
+        } else {
+            ""
+        };
+        let mut coordinates = Vec::with_capacity(3 * expected);
+        for arg in args {
+            let Expr::Variable(symbol) = arg else {
+                return Err(ParseError::new(
+                    "geometric arguments must be particle identifiers",
+                ));
+            };
+            let index = match self {
+                Self::Particles(prefix, count) => symbol
+                    .strip_prefix(prefix)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .filter(|&index| {
+                        index >= 1 && index <= count && *symbol == format!("{prefix}{index}")
+                    }),
+                Self::Hbond => ["a1", "a2", "a3", "d1", "d2", "d3"]
+                    .iter()
+                    .position(|name| symbol == name)
+                    .map(|index| index + 1),
+                _ => unreachable!(),
+            }
+            .ok_or_else(|| ParseError::new(&format!("unknown particle: {symbol}")))?;
+            coordinates.extend(
+                ['x', 'y', 'z'].map(|axis| Expr::Variable(format!("{internal}{axis}{index}"))),
+            );
+        }
+        Ok(Some(Expr::Function(
+            format!("{internal}point{name}"),
+            coordinates,
+        )))
     }
 }
 
@@ -77,6 +132,10 @@ impl Expression {
 
     pub fn parse_unbound(src: &str) -> Result<Self, ParseError> {
         Self::parse_impl(src, true, GeometryMode::None)
+    }
+
+    pub fn parse_hbond(src: &str) -> Result<Self, ParseError> {
+        Self::parse_impl(src, true, GeometryMode::Hbond)
     }
 
     pub fn parse_geometric(
@@ -955,53 +1014,10 @@ impl Parser<'_> {
                                     )));
                                 }
                                 Expr::Function(name, args)
-                            } else if let GeometryMode::Particles(prefix, count) = self.geometry {
-                                if matches!(name.as_str(), "distance" | "angle" | "dihedral") {
-                                    let expected = match name.as_str() {
-                                        "distance" => 2,
-                                        "angle" => 3,
-                                        _ => 4,
-                                    };
-                                    if args.len() != expected {
-                                        return Err(ParseError::new(&format!(
-                                            "{name} requires {expected} particles"
-                                        )));
-                                    }
-                                    let mut coordinates = Vec::with_capacity(3 * expected);
-                                    for arg in args {
-                                        let Expr::Variable(symbol) = arg else {
-                                            return Err(ParseError::new(
-                                                "geometric arguments must be particle identifiers",
-                                            ));
-                                        };
-                                        let index = symbol
-                                            .strip_prefix(prefix)
-                                            .and_then(|s| s.parse::<usize>().ok())
-                                            .filter(|&index| {
-                                                index >= 1
-                                                    && index <= count
-                                                    && symbol == format!("{prefix}{index}")
-                                            })
-                                            .ok_or_else(|| {
-                                                ParseError::new(&format!(
-                                                    "unknown particle: {symbol}"
-                                                ))
-                                            })?;
-                                        coordinates.extend(
-                                            ['x', 'y', 'z'].map(|axis| {
-                                                Expr::Variable(format!("{axis}{index}"))
-                                            }),
-                                        );
-                                    }
-                                    Expr::Function(format!("point{name}"), coordinates)
-                                } else {
-                                    if !(1..=3).contains(&args.len()) {
-                                        return Err(ParseError::new(
-                                            "tabulated functions require 1-3 arguments",
-                                        ));
-                                    }
-                                    Expr::Function(name, args)
-                                }
+                            } else if let Some(expression) =
+                                self.geometry.symbolic_function(&name, &args)?
+                            {
+                                expression
                             } else {
                                 if !self.allow_unbound {
                                     return Err(error);

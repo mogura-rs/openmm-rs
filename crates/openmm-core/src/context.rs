@@ -9,6 +9,7 @@ use crate::forces::custom_bond::CustomBondForce;
 use crate::forces::custom_centroid::CustomCentroidBondForce;
 use crate::forces::custom_compound::CustomCompoundBondForce;
 use crate::forces::custom_external::CustomExternalForce;
+use crate::forces::custom_hbond::CustomHbondForce;
 use crate::forces::custom_nonbonded::CustomNonbondedForce;
 use crate::forces::custom_torsion::CustomTorsionForce;
 use crate::forces::harmonic_angle::HarmonicAngleForce;
@@ -299,6 +300,23 @@ impl<B: Backend> Context<B> {
             .unwrap_or_else(|| {
                 panic!("force at index {force_index} is not a CustomCentroidBondForce")
             });
+        target.update_parameters_from(source);
+    }
+
+    pub fn update_custom_hbond_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &CustomHbondForce,
+    ) {
+        let force = self
+            .system
+            .forces_mut()
+            .get_mut(force_index)
+            .unwrap_or_else(|| panic!("unknown force index {force_index}"));
+        let target = force
+            .as_any_mut()
+            .downcast_mut::<CustomHbondForce>()
+            .unwrap_or_else(|| panic!("force at index {force_index} is not a CustomHbondForce"));
         target.update_parameters_from(source);
     }
 

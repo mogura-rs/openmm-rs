@@ -5,6 +5,7 @@ pub mod custom_centroid;
 pub mod custom_compound;
 mod custom_evaluator;
 pub mod custom_external;
+pub mod custom_hbond;
 pub mod custom_nonbonded;
 pub mod custom_torsion;
 mod ewald;

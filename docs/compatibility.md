@@ -49,7 +49,7 @@ revision in generated validation results.
 | Bonded forces | Partial | Harmonic bonds/angles, periodic/RB torsions and CMAP have analytic forces and reference comparisons; broader API validation and GPU execution remain |
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
-| Custom forces | Partial | Seven force types use compiled expressions and analytic derivatives; nonbonded, compound and centroid forces support six table types; periodic external distances and compound/centroid geometric functions are implemented; other force types and broader API coverage remain |
+| Custom forces | Partial | Eight force types use compiled expressions and analytic derivatives; nonbonded, compound, centroid and hydrogen bond forces support six table types; periodic external distances and geometric functions are implemented; other force types and broader API coverage remain |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | Thin CPU wrappers exist, but the interface is not yet OpenMM-compatible |
@@ -63,12 +63,16 @@ integrator configurations at four time points, forty-one nonbonded configuration
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
 wrapping configurations, six minimization configurations and 184 custom-expression
-states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states, 864 geometric-expression states and 864 centroid states.
+states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states, 864 geometric-expression states, 864 centroid states and 1,296 hydrogen bond states.
 Geometric fixtures cover external periodic distances, compound distance/angle/dihedral
 functions, explicit point functions, shared particles, triclinic boxes, nested
 functions, table and bond updates, global parameters, groups and short trajectories.
 Centroid fixtures cover mass/default, explicit and mixed weights, repeated particles,
 overlapping groups, zero weights, massless particles, updates and periodic geometry.
+Hydrogen bond fixtures cover all three cutoff methods, donor/acceptor parameters,
+omitted unused atoms, repeated primary atoms, exclusions, table/global updates,
+triclinic boxes and trajectories. Dihedral fixtures use nondegenerate coordinates;
+the angle and its force are undefined when either defining plane has zero area.
 Custom nonbonded fixtures cover all three methods, switching, overlapping and
 empty interaction groups, computed values, table updates, global changes, box
 changes and long-range corrections. Pair forces and energies use strict double
@@ -128,6 +132,12 @@ the raw weighted centers and redistributes forces with the same normalized weigh
 Periodic geometry applies between centers; it does not unwrap particles within a
 group. Parameter updates retain the Context's group membership and weights while
 updating bond parameters and tables, matching the supplied Reference kernel.
+CustomHbondForce supports donor/acceptor distance, angle and dihedral functions,
+tables, exclusions, all three cutoff methods and parameter updates. Cutoff traversal
+uses primary donor/acceptor atoms and cell storage without a dense pair matrix.
+An exhaustive traversal option supports numerical checks. Unused secondary atoms
+may be omitted; expressions that reference an omitted atom are rejected explicitly.
+Context updates preserve particle membership, exclusions, methods and cutoffs.
 Geometric angle derivatives retain the reference cross-product norm floor of
 `1e-6`; this regularizes nearly collinear angles and differs from the exact energy
 gradient below that threshold. Coincident-point distance derivatives are zero.
@@ -153,6 +163,14 @@ A subsequent ten-evaluation run with compound and centroid support measured
 5.22 evaluations/s for Rust and 5.32 for Reference at the same particle count.
 Process peak RSS was 6,616 KiB and 20,300 KiB, respectively. Short timing runs
 vary; these results do not remove the earlier same-node regression finding.
+
+Use `scripts/benchmark-hbond.sh` to measure donor/acceptor cutoff traversal.
+On its 20,736-particle periodic workload, ten force/energy evaluations measured
+5.16 evaluations/s with Rust cells, 0.80 with Rust exhaustive traversal and 0.46
+with OpenMM Reference. Peak process RSS was 7,896, 8,000 and 13,704 KiB,
+respectively. At 768 particles, exhaustive Rust traversal was faster than cells
+(164 versus 150 evaluations/s); cell construction has a cost for small systems.
+These measurements cover the supplied expression and Reference platform only.
 
 ## Validation and optimization rules
 
