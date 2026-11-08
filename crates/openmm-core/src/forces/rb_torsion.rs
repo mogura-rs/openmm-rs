@@ -4,7 +4,7 @@
 // Reference test: openmm/tests/TestRBTorsionForce.h
 use super::Force;
 use crate::forces::harmonic_bond::apply_minimum_image_ortho;
-use crate::forces::periodic_torsion::{cross3, dot3, sub3_pos};
+use crate::forces::periodic_torsion::{sub3_pos, torsion_geometry};
 use burn::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -84,44 +84,6 @@ impl Default for RBTorsionForce {
     }
 }
 
-fn torsion_energy(
-    pos: &[f64],
-    torsion: &RBTorsionParam,
-    use_pbc: bool,
-    box_vectors: Option<&[[f64; 3]; 3]>,
-) -> Option<f64> {
-    let mut b1 = sub3_pos(pos, torsion.particle2, torsion.particle1);
-    let mut b2 = sub3_pos(pos, torsion.particle3, torsion.particle2);
-    let mut b3 = sub3_pos(pos, torsion.particle4, torsion.particle3);
-
-    if use_pbc {
-        if let Some(bv) = box_vectors {
-            apply_minimum_image_ortho(&mut b1, bv);
-            apply_minimum_image_ortho(&mut b2, bv);
-            apply_minimum_image_ortho(&mut b3, bv);
-        }
-    }
-
-    let n1 = cross3(&b1, &b2);
-    let n2 = cross3(&b2, &b3);
-    let n1_len = dot3(&n1, &n1).sqrt();
-    let n2_len = dot3(&n2, &n2).sqrt();
-
-    if n1_len < 1e-8 || n2_len < 1e-8 {
-        return None;
-    }
-
-    let cos_theta = (dot3(&n1, &n2) / (n1_len * n2_len)).clamp(-1.0, 1.0);
-    let cos_phi = -cos_theta;
-    let mut energy = 0.0;
-    let mut cos_power = 1.0;
-    for &c in &torsion.coefficients {
-        energy += c * cos_power;
-        cos_power *= cos_phi;
-    }
-    Some(energy)
-}
-
 impl<B: Backend> Force<B> for RBTorsionForce {
     fn calc_forces_and_energy(
         &self,
@@ -142,25 +104,34 @@ impl<B: Backend> Force<B> for RBTorsionForce {
         let mut energy = 0.0f64;
 
         for tor in &self.torsions {
-            let Some(base_energy) = torsion_energy(&pos, tor, self.use_pbc, box_vectors) else {
+            let indices = [tor.particle1, tor.particle2, tor.particle3, tor.particle4];
+            let mut bonds = [
+                sub3_pos(&pos, indices[1], indices[0]),
+                sub3_pos(&pos, indices[2], indices[1]),
+                sub3_pos(&pos, indices[3], indices[2]),
+            ];
+            if self.use_pbc {
+                if let Some(vectors) = box_vectors {
+                    for bond in &mut bonds {
+                        apply_minimum_image_ortho(bond, vectors);
+                    }
+                }
+            }
+            let Some((phi, directions)) = torsion_geometry(&bonds[0], &bonds[1], &bonds[2]) else {
                 continue;
             };
-            energy += base_energy;
-
-            let h = 1e-5_f64;
-            for &particle in &[tor.particle1, tor.particle2, tor.particle3, tor.particle4] {
-                for d in 0..3 {
-                    let mut pos_plus = pos.clone();
-                    pos_plus[particle * 3 + d] += h;
-                    let e_plus = torsion_energy(&pos_plus, tor, self.use_pbc, box_vectors)
-                        .unwrap_or(base_energy);
-
-                    let mut pos_minus = pos.clone();
-                    pos_minus[particle * 3 + d] -= h;
-                    let e_minus = torsion_energy(&pos_minus, tor, self.use_pbc, box_vectors)
-                        .unwrap_or(base_energy);
-
-                    forces[particle * 3 + d] += -(e_plus - e_minus) / (2.0 * h);
+            let cosine = -phi.cos();
+            let mut value = tor.coefficients[5];
+            let mut derivative = 0.0;
+            for i in (0..5).rev() {
+                derivative = derivative * cosine + value;
+                value = value * cosine + tor.coefficients[i];
+            }
+            energy += value;
+            derivative *= phi.sin();
+            for (particle, direction) in indices.into_iter().zip(directions) {
+                for axis in 0..3 {
+                    forces[particle * 3 + axis] += derivative * direction[axis];
                 }
             }
         }

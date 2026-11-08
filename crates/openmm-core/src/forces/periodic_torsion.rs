@@ -117,9 +117,9 @@ impl<B: Backend> Force<B> for PeriodicTorsionForce {
             let l = tor.particle4;
 
             // Bond vectors.
-            let mut b1 = sub3_pos(&pos, j, i); // r_i - r_j
-            let mut b2 = sub3_pos(&pos, k, j); // r_j - r_k  (central bond)
-            let mut b3 = sub3_pos(&pos, l, k); // r_k - r_l
+            let mut b1 = sub3_pos(&pos, j, i);
+            let mut b2 = sub3_pos(&pos, k, j);
+            let mut b3 = sub3_pos(&pos, l, k);
 
             if self.use_pbc {
                 if let Some(bv) = box_vectors {
@@ -129,63 +129,17 @@ impl<B: Backend> Force<B> for PeriodicTorsionForce {
                 }
             }
 
-            // Normal vectors to the two planes.
-            let n1 = cross3(&b1, &b2);
-            let n2 = cross3(&b2, &b3);
-
-            let n1_len2 = dot3(&n1, &n1);
-            let n2_len2 = dot3(&n2, &n2);
-            let n1_len = n1_len2.sqrt();
-            let n2_len = n2_len2.sqrt();
-
-            if n1_len < 1e-8 || n2_len < 1e-8 {
-                continue; // degenerate torsion
-            }
-
-            let cos_phi = dot3(&n1, &n2) / (n1_len * n2_len);
-            let cos_phi = cos_phi.clamp(-1.0, 1.0);
-
-            // Sign of phi: positive when b1, b2, b3 form a right-handed system.
-            let sign = if dot3(&cross3(&n1, &n2), &b2) < 0.0 {
-                -1.0
-            } else {
-                1.0
+            let Some((phi, directions)) = torsion_geometry(&b1, &b2, &b3) else {
+                continue;
             };
-            let phi = sign * cos_phi.acos();
-
-            let n = tor.periodicity as f64;
-            let arg = n * phi - tor.phase;
-            energy += tor.k * (1.0 + arg.cos());
-
-            // dE/dphi = -k * n * sin(n*phi - phase)
-            let de_dphi = -tor.k * n * arg.sin();
-
-            // Force on each atom via chain rule through n1, n2.
-            // See: Blondel & Karplus, J. Comput. Chem. 17, 1132 (1996).
-            let b2_len = dot3(&b2, &b2).sqrt();
-
-            let f1 = scale3(&cross3(&b1, &b2), -de_dphi * b2_len / n1_len2);
-            let f4 = scale3(&cross3(&b2, &b3), de_dphi * b2_len / n2_len2);
-
-            // f2 and f3 preserve momentum.
-            let b1_dot_b2 = dot3(&b1, &b2);
-            let b3_dot_b2 = dot3(&b3, &b2);
-            let b2_len2 = b2_len * b2_len;
-
-            let f2 = add3(
-                &scale3(&f1, -1.0 + b1_dot_b2 / b2_len2),
-                &scale3(&f4, b3_dot_b2 / b2_len2),
-            );
-            let f3 = add3(
-                &scale3(&f4, -1.0 + b3_dot_b2 / b2_len2),
-                &scale3(&f1, b1_dot_b2 / b2_len2),
-            );
-
-            for d in 0..3 {
-                forces[i * 3 + d] += f1[d];
-                forces[j * 3 + d] -= f2[d];
-                forces[k * 3 + d] -= f3[d];
-                forces[l * 3 + d] += f4[d];
+            let periodicity = tor.periodicity as f64;
+            let argument = periodicity * phi - tor.phase;
+            energy += tor.k * (1.0 + argument.cos());
+            let derivative = -tor.k * periodicity * argument.sin();
+            for (particle, direction) in [i, j, k, l].into_iter().zip(directions) {
+                for axis in 0..3 {
+                    forces[particle * 3 + axis] += derivative * direction[axis];
+                }
             }
         }
 
@@ -202,6 +156,30 @@ impl<B: Backend> Force<B> for PeriodicTorsionForce {
 }
 
 // --- Vector helpers ---
+
+pub(crate) fn torsion_geometry(
+    b1: &[f64; 3],
+    b2: &[f64; 3],
+    b3: &[f64; 3],
+) -> Option<(f64, [[f64; 3]; 4])> {
+    let n1 = cross3(b1, b2);
+    let n2 = cross3(b2, b3);
+    let n1_squared = dot3(&n1, &n1);
+    let n2_squared = dot3(&n2, &n2);
+    let length_squared = dot3(b2, b2);
+    if n1_squared < 1e-16 || n2_squared < 1e-16 || length_squared == 0.0 {
+        return None;
+    }
+    let length = length_squared.sqrt();
+    let phi = (dot3(&cross3(&n1, &n2), b2) / length).atan2(dot3(&n1, &n2));
+    let f1 = scale3(&n1, length / n1_squared);
+    let f4 = scale3(&n2, -length / n2_squared);
+    let a = dot3(b1, b2) / length_squared;
+    let b = dot3(b3, b2) / length_squared;
+    let f2 = add3(&scale3(&f1, -1.0 - a), &scale3(&f4, b));
+    let f3 = std::array::from_fn(|axis| -f1[axis] - f2[axis] - f4[axis]);
+    Some((phi, [f1, f2, f3, f4]))
+}
 
 #[inline]
 pub fn sub3_pos(pos: &[f64], a: usize, b: usize) -> [f64; 3] {

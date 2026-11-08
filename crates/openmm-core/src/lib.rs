@@ -1,3 +1,4 @@
+pub mod constraints;
 pub mod context;
 pub mod expression;
 pub mod forces;
@@ -5,10 +6,13 @@ pub mod integrators;
 pub mod state;
 pub mod system;
 pub mod units;
+pub mod virtual_sites;
 
+pub use constraints::{Constraint, ConstraintError};
 pub use context::Context;
 pub use state::{State, StateFlags};
 pub use system::System;
+pub use virtual_sites::VirtualSite;
 
 // Commonly used force re-exports.
 pub use forces::custom_angle::CustomAngleForce;

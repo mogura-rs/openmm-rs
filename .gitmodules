@@ -1,3 +1,0 @@
-[submodule "openmm"]
-	path = openmm
-	url = https://github.com/openmm/openmm.git

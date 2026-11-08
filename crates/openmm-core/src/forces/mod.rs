@@ -5,8 +5,10 @@ pub mod custom_nonbonded;
 pub mod custom_torsion;
 pub mod harmonic_angle;
 pub mod harmonic_bond;
+mod neighbors;
 pub mod nonbonded;
 pub mod periodic_torsion;
+mod pme;
 pub mod rb_torsion;
 
 use burn::prelude::*;

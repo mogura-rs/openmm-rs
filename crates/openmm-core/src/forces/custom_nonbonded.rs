@@ -11,6 +11,7 @@ use std::collections::HashMap;
 pub struct CustomNonbondedForce {
     energy_expr: Expression,
     per_particle_params: Vec<String>,
+    paired_parameter_names: Vec<[String; 2]>,
     particles: Vec<Vec<f64>>,
     exclusions: Vec<(usize, usize)>,
     global_param_names: Vec<String>,
@@ -25,6 +26,7 @@ impl CustomNonbondedForce {
         Ok(Self {
             energy_expr: Expression::parse(energy)?,
             per_particle_params: Vec::new(),
+            paired_parameter_names: Vec::new(),
             particles: Vec::new(),
             exclusions: Vec::new(),
             global_param_names: Vec::new(),
@@ -37,6 +39,8 @@ impl CustomNonbondedForce {
 
     pub fn add_per_particle_parameter(&mut self, name: &str) -> usize {
         self.per_particle_params.push(name.to_string());
+        self.paired_parameter_names
+            .push([format!("{name}1"), format!("{name}2")]);
         self.per_particle_params.len() - 1
     }
 
@@ -193,6 +197,12 @@ impl<B: Backend> Force<B> for CustomNonbondedForce {
         let excluded: std::collections::HashSet<(usize, usize)> =
             self.exclusions.iter().cloned().collect();
         let cutoff2 = self.cutoff_distance.map(|c| c * c);
+        let mut vars: HashMap<&str, f64> = HashMap::with_capacity(
+            1 + self.global_params.len() + 2 * self.paired_parameter_names.len(),
+        );
+        for (name, &value) in &self.global_params {
+            vars.insert(name.as_str(), value);
+        }
 
         for i in 0..n {
             for j in (i + 1)..n {
@@ -218,21 +228,12 @@ impl<B: Backend> Force<B> for CustomNonbondedForce {
                 }
                 let r = r2.sqrt();
 
-                // Build variable map: r + per-particle params (suffix 1/2) + globals.
-                let mut vars: HashMap<&str, f64> = HashMap::new();
                 vars.insert("r", r);
-                for (name, &val) in &self.global_params {
-                    vars.insert(name.as_str(), val);
-                }
-                // Per-particle parameters are named param1 and param2 for each pair.
-                // For the general case, suffix notation mirrors OpenMM convention.
                 let pi = &self.particles[i];
                 let pj = &self.particles[j];
-                for (idx, pname) in self.per_particle_params.iter().enumerate() {
-                    let name1 = format!("{}1", pname);
-                    let name2 = format!("{}2", pname);
-                    vars.insert(Box::leak(name1.into_boxed_str()), pi[idx]);
-                    vars.insert(Box::leak(name2.into_boxed_str()), pj[idx]);
+                for (idx, names) in self.paired_parameter_names.iter().enumerate() {
+                    vars.insert(names[0].as_str(), pi[idx]);
+                    vars.insert(names[1].as_str(), pj[idx]);
                 }
 
                 energy += self.energy_expr.compute(&vars).unwrap_or(0.0);

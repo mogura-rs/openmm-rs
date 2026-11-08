@@ -2,6 +2,7 @@
 // Generic over burn Backend: NdArray (CPU), Wgpu (GPU), Cuda.
 use burn::prelude::*;
 
+use crate::constraints::{ConstraintError, ConstraintSolver};
 use crate::forces::custom_angle::CustomAngleForce;
 use crate::forces::custom_bond::CustomBondForce;
 use crate::forces::custom_external::CustomExternalForce;
@@ -17,6 +18,7 @@ use crate::integrators::Integrator;
 use crate::state::{State, StateFlags};
 use crate::system::{validate_box_vectors, System};
 use crate::units::BoxVectors;
+use crate::virtual_sites::VirtualSitePlan;
 use std::collections::HashMap;
 
 pub struct Context<B: Backend> {
@@ -29,11 +31,24 @@ pub struct Context<B: Backend> {
     time: f64,
     step_count: u64,
     device: B::Device,
+    constraints: ConstraintSolver,
+    masses: Tensor<B, 1>,
+    virtual_sites: VirtualSitePlan,
 }
 
 impl<B: Backend<FloatElem = f32>> Context<B> {
     pub fn new(system: System<B>, integrator: Box<dyn Integrator<B>>, device: B::Device) -> Self {
         let n = system.num_particles();
+        assert!(
+            n > 0,
+            "cannot create a context for a system with no particles"
+        );
+        let masses = system.masses();
+        let virtual_sites = VirtualSitePlan::new(system.virtual_sites(), &masses);
+        let constraints = ConstraintSolver::new(system.constraints(), &masses)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let masses: Vec<f32> = masses.into_iter().map(|mass| mass as f32).collect();
+        let masses = Tensor::<B, 1>::from_floats(masses.as_slice(), &device);
         let periodic_box_vectors = system.default_periodic_box_vectors().copied();
         let mut parameters = HashMap::new();
         for force in system.forces() {
@@ -58,18 +73,35 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
             time: 0.0,
             step_count: 0,
             device,
+            constraints,
+            masses,
+            virtual_sites,
         }
     }
 
     pub fn set_positions(&mut self, pos: Tensor<B, 2>) {
+        assert_eq!(
+            pos.dims(),
+            [self.system.num_particles(), 3],
+            "positions must have shape [N, 3]"
+        );
         self.positions = pos;
     }
 
     pub fn set_velocities(&mut self, vel: Tensor<B, 2>) {
+        assert_eq!(
+            vel.dims(),
+            [self.system.num_particles(), 3],
+            "velocities must have shape [N, 3]"
+        );
         self.velocities = vel;
     }
 
     pub fn set_velocities_to_temperature(&mut self, temperature: f64) {
+        assert!(
+            temperature.is_finite() && temperature >= 0.0,
+            "temperature must be nonnegative and finite"
+        );
         let n = self.system.num_particles();
         let masses = self.system.masses();
         let scales: Vec<f32> = masses
@@ -109,6 +141,8 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
                 * (offset as f32);
             self.velocities = self.velocities.clone() - forces * correction;
         }
+        self.apply_velocity_constraints(1e-5)
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     pub fn get_time(&self) -> f64 {
@@ -367,25 +401,65 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
             total_energy += e;
         }
 
+        self.virtual_sites.distribute_forces(
+            self.system.virtual_sites(),
+            &self.positions,
+            &mut total_forces,
+            box_vecs.as_ref(),
+        );
         (total_forces, total_energy)
     }
 
-    /// Advance by one integrator step.
-    pub fn step(&mut self, steps: usize) {
-        let masses: Vec<f32> = self.system.masses().iter().map(|&m| m as f32).collect();
-        let masses_tensor = Tensor::<B, 1>::from_floats(masses.as_slice(), &self.device);
+    pub fn apply_constraints(&mut self, tolerance: f64) -> Result<(), ConstraintError> {
+        self.constraints.apply_positions(
+            &self.positions.clone(),
+            &mut self.positions,
+            tolerance,
+        )?;
+        self.compute_virtual_sites();
+        Ok(())
+    }
 
+    pub fn compute_virtual_sites(&mut self) {
+        self.virtual_sites.compute_positions(
+            self.system.virtual_sites(),
+            &mut self.positions,
+            self.periodic_box_vectors.as_ref(),
+        );
+    }
+
+    /// Reproduce the reference snapshot's nonconservative fractional symmetry forces.
+    /// The default uses the energy gradient, including for triclinic boxes.
+    pub fn set_reference_symmetry_forces(&mut self, enabled: bool) {
+        self.virtual_sites.set_reference_symmetry_forces(enabled);
+    }
+
+    pub fn apply_velocity_constraints(&mut self, tolerance: f64) -> Result<(), ConstraintError> {
+        self.constraints
+            .apply_velocities(&self.positions, &mut self.velocities, tolerance)
+    }
+
+    /// Advance the simulation, panicking if constraints fail to converge.
+    pub fn step(&mut self, steps: usize) {
+        self.try_step(steps)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    pub fn try_step(&mut self, steps: usize) -> Result<(), ConstraintError> {
         for _ in 0..steps {
             let (forces, _) = self.calc_forces_and_energy();
-            self.integrator.step(
+            self.integrator.step_constrained(
                 &mut self.positions,
                 &mut self.velocities,
                 &forces,
-                &masses_tensor,
-            );
+                &self.masses,
+                &self.constraints,
+            )?;
+            self.compute_virtual_sites();
             self.time += self.integrator.step_size();
             self.step_count += 1;
         }
+        Ok(())
     }
 
     pub fn get_state(&self, flags: StateFlags) -> State<B> {
@@ -421,8 +495,27 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
         let kinetic_energy = if flags.energy {
             let n = self.system.num_particles();
             let masses: Vec<f32> = self.system.masses().iter().map(|&m| m as f32).collect();
-            let m = Tensor::<B, 1>::from_floats(masses.as_slice(), &self.device).reshape([n, 1]); // [N, 1] for broadcasting
-            let v2 = self.velocities.clone() * self.velocities.clone();
+            let mass_tensor = Tensor::<B, 1>::from_floats(masses.as_slice(), &self.device);
+            let offset = self.integrator.velocity_time_offset();
+            let mut velocities = if offset == 0.0 {
+                self.velocities.clone()
+            } else {
+                self.velocities.clone()
+                    + forces.as_ref().unwrap().clone()
+                        * crate::integrators::inverse_masses(&mass_tensor)
+                        * offset as f32
+            };
+            if offset != 0.0 {
+                self.constraints
+                    .apply_velocities(
+                        &self.positions,
+                        &mut velocities,
+                        self.integrator.constraint_tolerance(),
+                    )
+                    .unwrap_or_else(|error| panic!("{error}"));
+            }
+            let m = mass_tensor.reshape([n, 1]);
+            let v2 = velocities.clone() * velocities;
             let ek: f32 = (m * v2).sum().into_scalar();
             Some(0.5 * ek as f64)
         } else {
@@ -437,8 +530,8 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
             periodic_box_vectors: self.periodic_box_vectors,
             positions: flags.positions.then(|| self.positions.clone()),
             velocities: flags.velocities.then(|| self.velocities.clone()),
-            forces,
-            potential_energy,
+            forces: if flags.forces { forces } else { None },
+            potential_energy: if flags.energy { potential_energy } else { None },
             kinetic_energy,
         }
     }
@@ -523,7 +616,7 @@ mod tests {
 
         let mut nonbonded = NonbondedForce::new();
         nonbonded.set_nonbonded_method(NonbondedMethod::CutoffPeriodic);
-        nonbonded.set_cutoff_distance(2.0);
+        nonbonded.set_cutoff_distance(1.0);
         nonbonded.add_particle(1.0, 1.0, 0.0);
         nonbonded.add_particle(-1.0, 1.0, 0.0);
         system.add_force(Box::new(nonbonded));

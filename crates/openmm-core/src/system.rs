@@ -1,5 +1,7 @@
+use crate::constraints::Constraint;
 use crate::context::Context;
 use crate::units::BoxVectors;
+use crate::virtual_sites::VirtualSite;
 use burn::prelude::Backend;
 
 use crate::forces::Force;
@@ -42,25 +44,49 @@ pub struct System<B: Backend> {
     particles: Vec<Particle>,
     box_vectors: Option<BoxVectors>,
     forces: Vec<Box<dyn Force<B>>>,
+    constraints: Vec<Constraint>,
+    virtual_sites: Vec<Option<VirtualSite>>,
 }
 
 impl<B: Backend> System<B> {
     pub fn new() -> Self {
         Self {
             particles: Vec::new(),
-            box_vectors: None,
+            box_vectors: Some([[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]]),
             forces: Vec::new(),
+            constraints: Vec::new(),
+            virtual_sites: Vec::new(),
         }
     }
 
     /// Returns the index of the added particle.
     pub fn add_particle(&mut self, mass: f64) -> usize {
+        assert!(
+            mass.is_finite() && mass >= 0.0,
+            "particle mass must be nonnegative and finite"
+        );
         self.particles.push(Particle { mass });
+        self.virtual_sites.push(None);
         self.particles.len() - 1
     }
 
     pub fn num_particles(&self) -> usize {
         self.particles.len()
+    }
+
+    pub fn set_virtual_site(&mut self, index: usize, site: VirtualSite) {
+        self.virtual_sites[index] = Some(site);
+    }
+    pub fn is_virtual_site(&self, index: usize) -> bool {
+        self.virtual_sites[index].is_some()
+    }
+    pub fn virtual_site(&self, index: usize) -> &VirtualSite {
+        self.virtual_sites[index]
+            .as_ref()
+            .expect("particle is not a virtual site")
+    }
+    pub(crate) fn virtual_sites(&self) -> &[Option<VirtualSite>] {
+        &self.virtual_sites
     }
 
     pub fn particle(&self, index: usize) -> &Particle {
@@ -69,6 +95,53 @@ impl<B: Backend> System<B> {
 
     pub fn masses(&self) -> Vec<f64> {
         self.particles.iter().map(|p| p.mass).collect()
+    }
+
+    pub fn set_particle_mass(&mut self, index: usize, mass: f64) {
+        assert!(
+            mass.is_finite() && mass >= 0.0,
+            "particle mass must be nonnegative and finite"
+        );
+        self.particles[index].mass = mass;
+    }
+
+    pub fn add_constraint(&mut self, particle1: usize, particle2: usize, distance: f64) -> usize {
+        self.constraints.push(Constraint {
+            particle1,
+            particle2,
+            distance,
+        });
+        self.constraints.len() - 1
+    }
+
+    pub fn num_constraints(&self) -> usize {
+        self.constraints.len()
+    }
+
+    pub fn constraints(&self) -> &[Constraint] {
+        &self.constraints
+    }
+
+    pub fn constraint_parameters(&self, index: usize) -> &Constraint {
+        &self.constraints[index]
+    }
+
+    pub fn set_constraint_parameters(
+        &mut self,
+        index: usize,
+        particle1: usize,
+        particle2: usize,
+        distance: f64,
+    ) {
+        self.constraints[index] = Constraint {
+            particle1,
+            particle2,
+            distance,
+        };
+    }
+
+    pub fn remove_constraint(&mut self, index: usize) {
+        self.constraints.remove(index);
     }
 
     /// Set orthogonal or triclinic periodic box. Vectors in nm, row-major.

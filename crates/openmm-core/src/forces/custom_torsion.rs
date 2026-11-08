@@ -3,7 +3,7 @@
 use super::Force;
 use crate::expression::Expression;
 use crate::forces::harmonic_bond::apply_minimum_image_ortho;
-use crate::forces::periodic_torsion::{add3, cross3, dot3, scale3, sub3_pos};
+use crate::forces::periodic_torsion::{sub3_pos, torsion_geometry};
 use burn::prelude::*;
 use std::collections::HashMap;
 
@@ -214,23 +214,9 @@ impl<B: Backend> Force<B> for CustomTorsionForce {
                 }
             }
 
-            let n1 = cross3(&b1, &b2);
-            let n2 = cross3(&b2, &b3);
-            let n1_len2 = dot3(&n1, &n1);
-            let n2_len2 = dot3(&n2, &n2);
-            let n1_len = n1_len2.sqrt();
-            let n2_len = n2_len2.sqrt();
-            if n1_len < 1e-8 || n2_len < 1e-8 {
+            let Some((phi, directions)) = torsion_geometry(&b1, &b2, &b3) else {
                 continue;
-            }
-
-            let cos_phi = (dot3(&n1, &n2) / (n1_len * n2_len)).clamp(-1.0, 1.0);
-            let sign = if dot3(&cross3(&n1, &n2), &b2) < 0.0 {
-                -1.0
-            } else {
-                1.0
             };
-            let phi = sign * cos_phi.acos();
 
             let mut vars: HashMap<&str, f64> = HashMap::new();
             vars.insert("theta", phi);
@@ -251,26 +237,10 @@ impl<B: Backend> Force<B> for CustomTorsionForce {
             let em = self.energy_expr.compute(&vars).unwrap_or(0.0);
             let de_dphi = (ep - em) / (2.0 * dph);
 
-            let b2_len = dot3(&b2, &b2).sqrt();
-            let f1 = scale3(&cross3(&b1, &b2), -de_dphi * b2_len / n1_len2);
-            let f4 = scale3(&cross3(&b2, &b3), de_dphi * b2_len / n2_len2);
-            let b2_len2 = b2_len * b2_len;
-            let b1_b2 = dot3(&b1, &b2);
-            let b3_b2 = dot3(&b3, &b2);
-            let f2 = add3(
-                &scale3(&f1, -1.0 + b1_b2 / b2_len2),
-                &scale3(&f4, b3_b2 / b2_len2),
-            );
-            let f3 = add3(
-                &scale3(&f4, -1.0 + b3_b2 / b2_len2),
-                &scale3(&f1, b1_b2 / b2_len2),
-            );
-
-            for d in 0..3 {
-                forces[i * 3 + d] += f1[d];
-                forces[j * 3 + d] -= f2[d];
-                forces[k * 3 + d] -= f3[d];
-                forces[l * 3 + d] += f4[d];
+            for (particle, direction) in [i, j, k, l].into_iter().zip(directions) {
+                for axis in 0..3 {
+                    forces[particle * 3 + axis] += de_dphi * direction[axis];
+                }
             }
         }
 

@@ -4113,6 +4113,7 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "burn",
+ "libm",
  "nalgebra",
  "rayon",
  "rustfft",

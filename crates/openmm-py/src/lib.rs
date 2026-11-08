@@ -1,5 +1,6 @@
 // Thin pyo3 wrapper. All simulation logic lives in openmm-core.
 // Backend is fixed to NdArray (CPU) at the Python boundary.
+mod virtual_sites;
 use burn::backend::NdArray;
 use burn::prelude::{Backend, Tensor};
 use openmm_core::forces::custom_angle::CustomAngleForce;
@@ -353,6 +354,27 @@ impl PyNonbondedForce {
 
     fn set_ewald_error_tolerance(&mut self, tolerance: f64) {
         self.inner_mut().set_ewald_error_tolerance(tolerance);
+    }
+
+    fn set_use_dispersion_correction(&mut self, enabled: bool) {
+        self.inner_mut().set_use_dispersion_correction(enabled);
+    }
+    fn set_use_switching_function(&mut self, enabled: bool) {
+        self.inner_mut().set_use_switching_function(enabled);
+    }
+    fn set_switching_distance(&mut self, distance: f64) {
+        self.inner_mut().set_switching_distance(distance);
+    }
+    fn set_exceptions_use_periodic_boundary_conditions(&mut self, enabled: bool) {
+        self.inner_mut()
+            .set_exceptions_use_periodic_boundary_conditions(enabled);
+    }
+    fn set_pme_parameters(&mut self, alpha: f64, nx: usize, ny: usize, nz: usize) {
+        self.inner_mut().set_pme_parameters(alpha, [nx, ny, nz]);
+    }
+    fn get_pme_parameters(&self) -> (f64, usize, usize, usize) {
+        let (alpha, [nx, ny, nz]) = self.inner_ref().pme_parameters();
+        (alpha, nx, ny, nz)
     }
 
     fn set_nonbonded_method(&mut self, method: &str) -> PyResult<()> {
@@ -1342,6 +1364,55 @@ impl PySystem {
         self.inner_ref().particle(index).mass
     }
 
+    fn set_particle_mass(&mut self, index: usize, mass: f64) {
+        self.inner_mut().set_particle_mass(index, mass);
+    }
+
+    fn set_virtual_site(&mut self, index: usize, site: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner_mut()
+            .set_virtual_site(index, virtual_sites::from_python(site)?);
+        Ok(())
+    }
+    fn is_virtual_site(&self, index: usize) -> bool {
+        self.inner_ref().is_virtual_site(index)
+    }
+    fn get_virtual_site(&self, index: usize, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        virtual_sites::to_python(self.inner_ref().virtual_site(index), py)
+    }
+
+    fn add_constraint(&mut self, particle1: usize, particle2: usize, distance: f64) -> usize {
+        self.inner_mut()
+            .add_constraint(particle1, particle2, distance)
+    }
+
+    fn num_constraints(&self) -> usize {
+        self.inner_ref().num_constraints()
+    }
+
+    fn get_constraint_parameters(&self, index: usize) -> (usize, usize, f64) {
+        let constraint = self.inner_ref().constraint_parameters(index);
+        (
+            constraint.particle1,
+            constraint.particle2,
+            constraint.distance,
+        )
+    }
+
+    fn set_constraint_parameters(
+        &mut self,
+        index: usize,
+        particle1: usize,
+        particle2: usize,
+        distance: f64,
+    ) {
+        self.inner_mut()
+            .set_constraint_parameters(index, particle1, particle2, distance);
+    }
+
+    fn remove_constraint(&mut self, index: usize) {
+        self.inner_mut().remove_constraint(index);
+    }
+
     fn num_forces(&self) -> usize {
         self.inner_ref().num_forces()
     }
@@ -1444,6 +1515,25 @@ struct PyContext {
 
 #[pymethods]
 impl PyContext {
+    fn compute_virtual_sites(&mut self) {
+        self.inner.compute_virtual_sites();
+    }
+
+    fn set_reference_symmetry_forces(&mut self, enabled: bool) {
+        self.inner.set_reference_symmetry_forces(enabled);
+    }
+    fn apply_constraints(&mut self, tolerance: f64) -> PyResult<()> {
+        self.inner
+            .apply_constraints(tolerance)
+            .map_err(|error| err(&error.to_string()))
+    }
+
+    fn apply_velocity_constraints(&mut self, tolerance: f64) -> PyResult<()> {
+        self.inner
+            .apply_velocity_constraints(tolerance)
+            .map_err(|error| err(&error.to_string()))
+    }
+
     fn set_positions(&mut self, positions: Vec<Vec3>) {
         let device: Device = Default::default();
         self.inner.set_positions(to_tensor3(&positions, &device));
@@ -1578,8 +1668,10 @@ impl PyContext {
         ))
     }
 
-    fn step(&mut self, steps: usize) {
-        self.inner.step(steps);
+    fn step(&mut self, steps: usize) -> PyResult<()> {
+        self.inner
+            .try_step(steps)
+            .map_err(|error| err(&error.to_string()))
     }
 
     #[pyo3(signature = (positions=false, velocities=false, forces=false, energy=false, parameters=false, parameter_derivatives=false))]
@@ -1605,6 +1697,7 @@ impl PyContext {
 
 #[pymodule]
 fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    virtual_sites::register(m)?;
     m.add_class::<PyState>()?;
     m.add_class::<PyVerletIntegrator>()?;
     m.add_class::<PyLangevinMiddleIntegrator>()?;

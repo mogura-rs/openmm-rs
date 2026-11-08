@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`openmm-rs` is a pure-Rust implementation of [OpenMM](https://openmm.org/), a molecular dynamics simulation toolkit. The original OpenMM source is included as a git submodule at `./openmm/` and serves as the reference for API design and test correctness.
+`openmm-rs` is a pure-Rust implementation of [OpenMM](https://openmm.org/), a molecular dynamics simulation toolkit. Use a separate OpenMM checkout as the reference for API design and numerical correctness. Set `OPENMM_SOURCE` to select it; the default is the sibling directory `../openmm`. The reference is not a submodule.
+
+The full compatibility and performance target is tracked in
+`docs/compatibility.md`. The implementation remains incomplete.
 
 ## Key Crates
 
@@ -24,7 +27,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 openmm-rs/
 ├── Cargo.toml                  # workspace root
-├── openmm/                     # git submodule — reference implementation & tests
 └── crates/
     ├── openmm-core/            # all physics: forces, integrators, context
     │   └── src/
@@ -44,7 +46,7 @@ openmm-rs/
 # Build (CPU/NdArray backend, default)
 cargo build
 
-# Build with WGPU (GPU) backend
+# Compile the WGPU backend; this alone does not validate GPU force execution
 cargo build -p openmm-core --features wgpu --no-default-features
 
 # Release build
@@ -96,7 +98,9 @@ Context<B>      - owns System + Integrator + positions + velocities tensors
   └─ State<B>   - immutable snapshot (positions, velocities, forces, energy)
 ```
 
-### Force Trait
+### Abbreviated Force Trait
+
+The actual trait also provides cloning, downcasting and parameter methods.
 
 ```rust
 pub trait Force<B: Backend>: Send + Sync {
@@ -121,7 +125,7 @@ Use analytic gradients for simple forces (HarmonicBond, HarmonicAngle). Use `bur
 
 ## Reference Tests
 
-OpenMM test headers are in `openmm/tests/Test*.h`. Each test constructs a `System`, adds particles, adds a `Force`, creates a `Context`, sets positions, and asserts energy/forces using `ASSERT_EQUAL_TOL` (tolerance ~1e-5).
+OpenMM test headers are in `$OPENMM_SOURCE/tests/Test*.h`. Each test constructs a `System`, adds particles, adds a `Force`, creates a `Context`, sets positions, and asserts energy/forces using `ASSERT_EQUAL_TOL` (tolerance ~1e-5). Paths prefixed with `openmm/` below refer to that external checkout.
 
 Replicate the same numerical assertions in Rust tests using `approx::assert_relative_eq!`. Tests live in `#[cfg(test)]` modules within each source file. Mapping:
 
@@ -129,31 +133,35 @@ Replicate the same numerical assertions in Rust tests using `approx::assert_rela
 openmm/tests/TestHarmonicBondForce.h     → forces/harmonic_bond.rs  (implemented)
 openmm/tests/TestHarmonicAngleForce.h    → forces/harmonic_angle.rs  (implemented)
 openmm/tests/TestPeriodicTorsionForce.h  → forces/periodic_torsion.rs  (implemented)
-openmm/tests/TestNonbondedForce.h        → forces/nonbonded.rs  (TODO)
+openmm/tests/TestNonbondedForce.h        → forces/nonbonded.rs  (partial coverage)
 openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implemented)
 ```
 
 ## Implementation Status & Priorities
 
-### Done
+### Implemented Subsets
 - `HarmonicBondForce` — analytic forces + PBC
 - `HarmonicAngleForce` — analytic forces + PBC
 - `PeriodicTorsionForce` — Blondel-Karplus formula + PBC
 - `VerletIntegrator` — leapfrog
-- `LangevinMiddleIntegrator` — BAOAB splitting
+- `LangevinMiddleIntegrator` — LFMiddle splitting
 - `BrownianIntegrator` — overdamped Langevin
+- `NonbondedForce` — cutoff/reaction field, PME, switching and dispersion correction
+- Constraints — sparse SHAKE/RATTLE position and velocity projection
+- Custom bond, angle, torsion, external and nonbonded forces — partial expression support
+- Python wrappers — partial snake_case CPU interface
 
 ### Next
-1. `NonbondedForce` — cutoff direct space, then PME reciprocal (`rustfft`)
-2. Constraints — CCMA (`openmm/platforms/reference/src/SimTKReference/ReferenceCCMAAlgorithm.cpp`)
-3. Custom\*Force — expression parser + evaluator
-4. `MonteCarloBarostat`
-5. Python bindings (`openmm-py`)
+1. Complete the compatibility checklist in `docs/compatibility.md`.
+2. Add Ewald/LJPME, parameter offsets, virtual sites, force groups and pressure control.
+3. Extend custom expressions/forces, integrators and Python API compatibility.
+4. Implement resident GPU force evaluation and validate through Slurm.
+5. Measure and optimize throughput and peak host/device memory without weakening numerical validation.
 
 ## Important Conventions
 
 - Units follow OpenMM defaults: nm, kJ/mol, Da, ps, e (elementary charge)
-- `uom` types enforce unit correctness at compile time; convert at system boundaries
+- Public simulation methods currently accept scalar values in OpenMM units; `uom` aliases do not yet enforce units at those boundaries
 - Periodic boundary conditions: use minimum image convention for all pairwise distances
 - PME cutoff and Ewald parameters live in `NonbondedForce`, not in `Context`
 - Reference implementation is `openmm/platforms/reference/src/SimTKReference/`; use it as the algorithmic ground truth

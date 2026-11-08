@@ -2,7 +2,7 @@
 name = "openmm-core"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT AND BSD-3-Clause"
 
 [features]
 default = ["ndarray"]
@@ -17,6 +17,7 @@ rayon.workspace = true
 uom.workspace = true
 # mdtraj-rs.workspace = true  # uncomment when file I/O module is implemented
 rustfft = "6"
+libm = "0.2"
 
 [dev-dependencies]
 approx.workspace = true

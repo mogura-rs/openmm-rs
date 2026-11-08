@@ -8,17 +8,41 @@
 // in the velocities tensor between steps.
 //
 // Reference test: openmm/tests/TestVerletIntegrator.h
-use super::Integrator;
+use super::{fixed_particles, inverse_masses, Integrator};
 use burn::prelude::*;
 
 pub struct VerletIntegrator {
     /// Step size in ps.
     dt: f64,
+    constraint_tolerance: f64,
 }
 
 impl VerletIntegrator {
     pub fn new(step_size: f64) -> Self {
-        Self { dt: step_size }
+        assert!(
+            step_size.is_finite() && step_size > 0.0,
+            "step size must be positive and finite"
+        );
+        Self {
+            dt: step_size,
+            constraint_tolerance: 1e-5,
+        }
+    }
+
+    pub fn set_constraint_tolerance(&mut self, tolerance: f64) {
+        assert!(
+            tolerance.is_finite() && tolerance > 0.0 && tolerance < 1.0,
+            "constraint tolerance must be between zero and one"
+        );
+        self.constraint_tolerance = tolerance;
+    }
+
+    pub fn set_step_size(&mut self, step_size: f64) {
+        assert!(
+            step_size.is_finite() && step_size > 0.0,
+            "step size must be positive and finite"
+        );
+        self.dt = step_size;
     }
 }
 
@@ -34,19 +58,23 @@ impl<B: Backend> Integrator<B> for VerletIntegrator {
 
         // a = F / m,  where masses are [N] and forces/velocities are [N, 3].
         // Expand masses to [N, 1] for broadcasting.
-        let n = masses.dims()[0];
-        let inv_mass = masses.clone().recip().reshape([n, 1]);
+        let inv_mass = inverse_masses(masses);
 
         // Leapfrog: v(t+dt/2) = v(t-dt/2) + a(t) * dt
         let accel = forces.clone() * inv_mass.clone();
         *velocities = velocities.clone() + accel * dt;
 
         // x(t+dt) = x(t) + v(t+dt/2) * dt
-        *positions = positions.clone() + velocities.clone() * dt;
+        *positions =
+            positions.clone() + (velocities.clone() * dt).mask_fill(fixed_particles(masses), 0.0);
     }
 
     fn step_size(&self) -> f64 {
         self.dt
+    }
+
+    fn constraint_tolerance(&self) -> f64 {
+        self.constraint_tolerance
     }
 
     fn velocity_time_offset(&self) -> f64 {

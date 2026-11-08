@@ -1,13 +1,17 @@
 // NonbondedForce: LJ + Coulomb with exclusions/exceptions.
-// Methods: NoCutoff, CutoffNonPeriodic, CutoffPeriodic, PME (stub).
+// Methods: NoCutoff, CutoffNonPeriodic, CutoffPeriodic, PME.
 // Reference test: openmm/tests/TestNonbondedForce.h
 // Reference impl: openmm/platforms/reference/src/SimTKReference/ReferenceNonbondedIxn.cpp
+use super::neighbors::NeighborCells;
+use super::pme::{reciprocal_box, PmeCache};
 use super::Force;
 use crate::forces::harmonic_bond::apply_minimum_image_ortho;
 use burn::prelude::*;
+use std::f64::consts::PI;
+use std::sync::OnceLock;
 
 /// 1/(4*pi*eps0) in kJ/mol * nm / e^2.
-pub const ONE_4PI_EPS0: f64 = 138.935456;
+pub const ONE_4PI_EPS0: f64 = 138.93545764438198;
 
 /// Nonbonded calculation method.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,6 +61,16 @@ pub struct NonbondedForce {
     reaction_field_dielectric: f64,
     /// PME error tolerance (used to derive alpha and grid spacing).
     ewald_error_tolerance: f64,
+    exceptions_use_pbc: bool,
+    use_dispersion_correction: bool,
+    use_switching_function: bool,
+    switching_distance: f64,
+    pme_parameters: Option<(f64, [usize; 3])>,
+    pme_cache: PmeCache,
+    dispersion_coefficient: OnceLock<f64>,
+    exclusions: OnceLock<std::collections::HashSet<(usize, usize)>>,
+    neighbor_cells: NeighborCells,
+    use_neighbor_cells: bool,
 }
 
 impl NonbondedForce {
@@ -68,11 +82,23 @@ impl NonbondedForce {
             cutoff_distance: 1.0,
             reaction_field_dielectric: 78.3,
             ewald_error_tolerance: 5e-4,
+            exceptions_use_pbc: false,
+            use_dispersion_correction: true,
+            use_switching_function: false,
+            switching_distance: -1.0,
+            pme_parameters: None,
+            pme_cache: PmeCache::default(),
+            dispersion_coefficient: OnceLock::new(),
+            exclusions: OnceLock::new(),
+            neighbor_cells: NeighborCells::default(),
+            use_neighbor_cells: true,
         }
     }
 
     /// Add a particle. Returns particle index.
     pub fn add_particle(&mut self, charge: f64, sigma: f64, epsilon: f64) -> usize {
+        validate_particle_parameters(charge, sigma, epsilon);
+        self.dispersion_coefficient.take();
         self.particles.push(ParticleParam {
             charge,
             sigma,
@@ -82,6 +108,8 @@ impl NonbondedForce {
     }
 
     pub fn set_particle_parameters(&mut self, index: usize, charge: f64, sigma: f64, epsilon: f64) {
+        validate_particle_parameters(charge, sigma, epsilon);
+        self.dispersion_coefficient.take();
         self.particles[index] = ParticleParam {
             charge,
             sigma,
@@ -106,6 +134,7 @@ impl NonbondedForce {
         sigma: f64,
         epsilon: f64,
     ) -> usize {
+        self.exclusions.take();
         self.exceptions.push(ExceptionParam {
             particle1: p1,
             particle2: p2,
@@ -125,6 +154,7 @@ impl NonbondedForce {
         sigma: f64,
         epsilon: f64,
     ) {
+        self.exclusions.take();
         self.exceptions[index] = ExceptionParam {
             particle1: p1,
             particle2: p2,
@@ -201,8 +231,8 @@ impl NonbondedForce {
             let sigma = 0.5 * (self.particles[*i].sigma + self.particles[*j].sigma);
             self.add_exception(*i, *j, 0.0, sigma, 0.0);
         }
-        // Add 1-4 scaled interactions.
-        for (i, j) in &pairs_14 {
+        // A shorter path takes precedence in rings and branched molecules.
+        for (i, j) in pairs_14.difference(&exclusions) {
             let pi = &self.particles[*i];
             let pj = &self.particles[*j];
             let charge_prod = coulomb14scale * pi.charge * pj.charge;
@@ -228,6 +258,11 @@ impl NonbondedForce {
     }
 
     pub fn set_cutoff_distance(&mut self, cutoff: f64) {
+        assert!(
+            cutoff.is_finite() && cutoff > 0.0,
+            "cutoff must be positive and finite"
+        );
+        self.dispersion_coefficient.take();
         self.cutoff_distance = cutoff;
     }
 
@@ -236,6 +271,10 @@ impl NonbondedForce {
     }
 
     pub fn set_reaction_field_dielectric(&mut self, eps: f64) {
+        assert!(
+            !eps.is_nan() && eps >= 1.0,
+            "reaction field dielectric must be at least one"
+        );
         self.reaction_field_dielectric = eps;
     }
 
@@ -244,11 +283,129 @@ impl NonbondedForce {
     }
 
     pub fn set_ewald_error_tolerance(&mut self, tol: f64) {
+        assert!(
+            tol.is_finite() && tol > 0.0 && tol < 0.5,
+            "Ewald tolerance must be between zero and one half"
+        );
         self.ewald_error_tolerance = tol;
     }
 
     pub fn ewald_error_tolerance(&self) -> f64 {
         self.ewald_error_tolerance
+    }
+
+    pub fn set_exceptions_use_periodic_boundary_conditions(&mut self, periodic: bool) {
+        self.exceptions_use_pbc = periodic;
+    }
+
+    pub fn exceptions_use_periodic_boundary_conditions(&self) -> bool {
+        self.exceptions_use_pbc
+    }
+
+    /// Select cell traversal or exhaustive enumeration; the physical model is unchanged.
+    pub fn set_use_neighbor_cells(&mut self, enabled: bool) {
+        self.use_neighbor_cells = enabled;
+    }
+
+    pub fn set_use_dispersion_correction(&mut self, enabled: bool) {
+        self.use_dispersion_correction = enabled;
+    }
+    pub fn use_dispersion_correction(&self) -> bool {
+        self.use_dispersion_correction
+    }
+    pub fn set_use_switching_function(&mut self, enabled: bool) {
+        self.use_switching_function = enabled;
+        self.dispersion_coefficient.take();
+    }
+    pub fn use_switching_function(&self) -> bool {
+        self.use_switching_function
+    }
+    pub fn set_switching_distance(&mut self, distance: f64) {
+        assert!(
+            distance.is_finite() && distance >= 0.0,
+            "switching distance must be nonnegative and finite"
+        );
+        self.switching_distance = distance;
+        self.dispersion_coefficient.take();
+    }
+    pub fn switching_distance(&self) -> f64 {
+        self.switching_distance
+    }
+
+    pub fn set_pme_parameters(&mut self, alpha: f64, dimensions: [usize; 3]) {
+        assert!(
+            alpha.is_finite() && alpha >= 0.0,
+            "PME alpha must be nonnegative and finite"
+        );
+        assert!(
+            alpha == 0.0 || dimensions.iter().all(|&n| n >= 5),
+            "PME grid dimensions must be at least five"
+        );
+        self.pme_parameters = if alpha == 0.0 {
+            None
+        } else {
+            Some((alpha, dimensions))
+        };
+    }
+
+    pub fn pme_parameters(&self) -> (f64, [usize; 3]) {
+        self.pme_parameters.unwrap_or((0.0, [0; 3]))
+    }
+
+    pub fn effective_pme_parameters(&self, box_vectors: &[[f64; 3]; 3]) -> (f64, [usize; 3]) {
+        self.pme_parameters.unwrap_or_else(|| {
+            let alpha = (-(2.0 * self.ewald_error_tolerance).ln()).sqrt() / self.cutoff_distance;
+            let dimensions = std::array::from_fn(|axis| {
+                (2.0 * alpha * box_vectors[axis][axis]
+                    / (3.0 * self.ewald_error_tolerance.powf(0.2)))
+                .ceil()
+                .max(6.0) as usize
+            });
+            (alpha, dimensions)
+        })
+    }
+
+    fn dispersion_correction(&self, volume: f64) -> f64 {
+        *self.dispersion_coefficient.get_or_init(|| {
+            let mut moments = [0.0; 13];
+            let mut diagonal = [0.0; 13];
+            for particle in &self.particles {
+                let mut power = 1.0;
+                for k in 0..=12 {
+                    moments[k] += particle.epsilon.sqrt() * power;
+                    diagonal[k] += particle.epsilon * power;
+                    power *= particle.sigma;
+                }
+            }
+            let pair_moment = |power: usize| {
+                let mut coefficient = 1.0;
+                let mut sum = 0.0;
+                for k in 0..=power {
+                    sum += coefficient * moments[k] * moments[power - k];
+                    coefficient *= (power - k) as f64 / (k + 1) as f64;
+                }
+                sum / 2.0_f64.powi(power as i32) + diagonal[power]
+            };
+            let integral = |power: i32| {
+                let tail = self.cutoff_distance.powi(3 - power) / (power - 3) as f64;
+                if !self.use_switching_function {
+                    return tail;
+                }
+                assert!(
+                    self.switching_distance > 0.0 && self.switching_distance < self.cutoff_distance,
+                    "dispersion switching distance must be between zero and cutoff"
+                );
+                let f = |r: f64| {
+                    let t = (r - self.switching_distance)
+                        / (self.cutoff_distance - self.switching_distance);
+                    t.powi(3) * (10.0 + t * (-15.0 + 6.0 * t)) * r.powi(2 - power)
+                };
+                tail + integrate(&f, self.switching_distance, self.cutoff_distance)
+            };
+            let n = self.particles.len() as f64;
+            8.0 * PI * n / (n + 1.0)
+                * (pair_moment(12) * integral(12) - pair_moment(6) * integral(6))
+        }) / volume
     }
 
     pub fn update_parameters_from(&mut self, source: &Self) {
@@ -264,6 +421,8 @@ impl NonbondedForce {
         );
         self.particles = source.particles.clone();
         self.exceptions = source.exceptions.clone();
+        self.exclusions.take();
+        self.dispersion_coefficient.take();
     }
 }
 
@@ -283,6 +442,11 @@ impl<B: Backend> Force<B> for NonbondedForce {
     ) -> (Tensor<B, 2>, f64) {
         let device = positions.device();
         let n = positions.dims()[0];
+        assert_eq!(
+            n,
+            self.particles.len(),
+            "NonbondedForce must have one parameter record per particle"
+        );
         let pos: Vec<f64> = positions
             .to_data()
             .to_vec::<f32>()
@@ -294,19 +458,12 @@ impl<B: Backend> Force<B> for NonbondedForce {
         let mut forces = vec![0.0f64; n * 3];
         let mut energy = 0.0f64;
 
-        // Build exclusion set for O(1) lookup.
-        let excluded: std::collections::HashSet<(usize, usize)> = self
-            .exceptions
-            .iter()
-            .map(|e| {
-                let (a, b) = (e.particle1, e.particle2);
-                if a < b {
-                    (a, b)
-                } else {
-                    (b, a)
-                }
-            })
-            .collect();
+        let excluded = self.exclusions.get_or_init(|| {
+            self.exceptions
+                .iter()
+                .map(|e| (e.particle1.min(e.particle2), e.particle1.max(e.particle2)))
+                .collect()
+        });
 
         // Direct space: all pairs (respecting cutoff and exclusions).
         let use_cutoff = matches!(
@@ -320,56 +477,30 @@ impl<B: Backend> Force<B> for NonbondedForce {
             NonbondedMethod::CutoffPeriodic | NonbondedMethod::PME
         );
         let cutoff2 = self.cutoff_distance * self.cutoff_distance;
-
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let key = (i, j);
-                if excluded.contains(&key) {
-                    continue;
-                }
-
-                let mut delta = [
-                    pos[j * 3] - pos[i * 3],
-                    pos[j * 3 + 1] - pos[i * 3 + 1],
-                    pos[j * 3 + 2] - pos[i * 3 + 2],
-                ];
-
-                if use_pbc {
-                    if let Some(bv) = box_vectors {
-                        apply_minimum_image_ortho(&mut delta, bv);
-                    }
-                }
-
-                let r2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
-
-                if use_cutoff && r2 >= cutoff2 {
-                    continue;
-                }
-
-                let r = r2.sqrt();
-                let (e, f_over_r) = lj_coulomb_pair(
-                    &self.particles[i],
-                    &self.particles[j],
-                    r,
-                    r2,
-                    self.method,
-                    self.cutoff_distance,
-                    self.reaction_field_dielectric,
-                );
-
-                energy += e;
-                for d in 0..3 {
-                    let f = f_over_r * delta[d];
-                    forces[i * 3 + d] -= f;
-                    forces[j * 3 + d] += f;
-                }
-            }
+        if use_pbc {
+            let vectors = box_vectors.expect("periodic nonbonded forces require box vectors");
+            assert!(
+                (0..3).all(|axis| 2.0 * self.cutoff_distance <= vectors[axis][axis] + 1e-12),
+                "cutoff must not exceed half the periodic box size"
+            );
         }
+        if use_cutoff && self.use_switching_function {
+            assert!(
+                self.switching_distance >= 0.0 && self.switching_distance < self.cutoff_distance,
+                "switching distance must be between zero and cutoff"
+            );
+        }
+        let pme = if self.method == NonbondedMethod::PME {
+            Some(self.effective_pme_parameters(box_vectors.unwrap()))
+        } else {
+            None
+        };
 
-        // Exceptions (exclusions have zero params; 1-4s have scaled params).
-        for exc in &self.exceptions {
-            let i = exc.particle1;
-            let j = exc.particle2;
+        let mut evaluate_pair = |i: usize, j: usize| {
+            let key = (i, j);
+            if excluded.contains(&key) {
+                return;
+            }
 
             let mut delta = [
                 pos[j * 3] - pos[i * 3],
@@ -384,14 +515,125 @@ impl<B: Backend> Force<B> for NonbondedForce {
             }
 
             let r2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
-            let r = r2.sqrt();
 
-            let (e, f_over_r) = lj_coulomb_exception(exc, r, r2);
+            if use_cutoff && r2 >= cutoff2 {
+                return;
+            }
+
+            let r = r2.sqrt();
+            let pi = &self.particles[i];
+            let pj = &self.particles[j];
+            let (mut lj_energy, mut lj_force) = lj_pair(
+                0.5 * (pi.sigma + pj.sigma),
+                (pi.epsilon * pj.epsilon).sqrt(),
+                r,
+                r2,
+            );
+            if use_cutoff && self.use_switching_function && r > self.switching_distance {
+                let t = (r - self.switching_distance)
+                    / (self.cutoff_distance - self.switching_distance);
+                let switch = 1.0 + t.powi(3) * (-10.0 + t * (15.0 - 6.0 * t));
+                let derivative = -30.0 * t * t * (1.0 - t).powi(2)
+                    / (self.cutoff_distance - self.switching_distance);
+                lj_force = switch * lj_force + lj_energy * derivative / r;
+                lj_energy *= switch;
+            }
+            let charge = pi.charge * pj.charge;
+            let (electrostatic_energy, electrostatic_force) = if let Some((alpha, _)) = pme {
+                screened_coulomb(charge, r, r2, alpha)
+            } else if use_cutoff {
+                reaction_field(
+                    charge,
+                    r,
+                    r2,
+                    self.cutoff_distance,
+                    self.reaction_field_dielectric,
+                )
+            } else {
+                coulomb_pair(charge, r, r2)
+            };
+            let e = lj_energy + electrostatic_energy;
+            let f_over_r = lj_force + electrostatic_force;
+
             energy += e;
             for d in 0..3 {
                 let f = f_over_r * delta[d];
-                forces[i * 3 + d] -= f;
-                forces[j * 3 + d] += f;
+                forces[i * 3 + d] += f;
+                forces[j * 3 + d] -= f;
+            }
+        };
+        if use_cutoff && self.use_neighbor_cells && n > 32 {
+            self.neighbor_cells.visit(
+                &pos,
+                self.cutoff_distance,
+                if use_pbc { box_vectors } else { None },
+                &mut evaluate_pair,
+            );
+        } else {
+            for i in 0..n {
+                for j in i + 1..n {
+                    evaluate_pair(i, j);
+                }
+            }
+        }
+
+        if let Some((alpha, dimensions)) = pme {
+            let vectors = box_vectors.unwrap();
+            let (_, volume) = reciprocal_box(vectors);
+            energy += self.pme_cache.evaluate(
+                &pos,
+                &self.particles,
+                vectors,
+                alpha,
+                dimensions,
+                &mut forces,
+            );
+            let charge_squared: f64 = self
+                .particles
+                .iter()
+                .map(|particle| particle.charge.powi(2))
+                .sum();
+            let total_charge: f64 = self.particles.iter().map(|particle| particle.charge).sum();
+            energy -= ONE_4PI_EPS0
+                * (alpha / PI.sqrt() * charge_squared
+                    + PI * total_charge.powi(2) / (2.0 * alpha * alpha * volume));
+        }
+        if use_pbc && self.use_dispersion_correction {
+            energy += self.dispersion_correction(reciprocal_box(box_vectors.unwrap()).1);
+        }
+
+        // Exceptions are untruncated and use their own periodicity setting.
+        for exc in &self.exceptions {
+            let i = exc.particle1;
+            let j = exc.particle2;
+
+            let mut delta = [
+                pos[j * 3] - pos[i * 3],
+                pos[j * 3 + 1] - pos[i * 3 + 1],
+                pos[j * 3 + 2] - pos[i * 3 + 2],
+            ];
+
+            if use_pbc && self.exceptions_use_pbc {
+                if let Some(bv) = box_vectors {
+                    apply_minimum_image_ortho(&mut delta, bv);
+                }
+            }
+
+            let r2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
+            let r = r2.sqrt();
+
+            let (mut e, mut f_over_r) = lj_coulomb_exception(exc, r, r2);
+            if let Some((alpha, _)) = pme {
+                let charge = self.particles[i].charge * self.particles[j].charge;
+                let (correction, derivative) = reciprocal_pair(charge, r, r2, alpha);
+                e -= correction;
+                f_over_r -= derivative;
+            }
+            energy += e;
+            for d in 0..3 {
+                let f = f_over_r * delta[d];
+                forces[i * 3 + d] += f;
+                forces[j * 3 + d] -= f;
             }
         }
 
@@ -408,33 +650,6 @@ impl<B: Backend> Force<B> for NonbondedForce {
             NonbondedMethod::CutoffPeriodic | NonbondedMethod::PME
         )
     }
-}
-
-/// Compute LJ + Coulomb energy and force/r for a standard particle pair.
-/// Returns (energy, dE/dr / r) so that F_i = -(dE/dr / r) * delta.
-fn lj_coulomb_pair(
-    pi: &ParticleParam,
-    pj: &ParticleParam,
-    r: f64,
-    r2: f64,
-    method: NonbondedMethod,
-    cutoff: f64,
-    rf_dielectric: f64,
-) -> (f64, f64) {
-    // Lorentz-Berthelot combining rules.
-    let sigma = 0.5 * (pi.sigma + pj.sigma);
-    let epsilon = (pi.epsilon * pj.epsilon).sqrt();
-    let charge_prod = pi.charge * pj.charge;
-
-    let (e_lj, f_lj_over_r) = lj_pair(sigma, epsilon, r, r2);
-    let (e_coul, f_coul_over_r) = match method {
-        NonbondedMethod::CutoffNonPeriodic => {
-            reaction_field(charge_prod, r, r2, cutoff, rf_dielectric)
-        }
-        _ => coulomb_pair(charge_prod, r, r2),
-    };
-
-    (e_lj + e_coul, f_lj_over_r + f_coul_over_r)
 }
 
 /// Compute energy and force/r for an exception pair (pre-combined params).
@@ -482,12 +697,104 @@ fn reaction_field(charge_prod: f64, r: f64, r2: f64, rc: f64, eps_rf: f64) -> (f
         return (0.0, 0.0);
     }
     let rc3 = rc * rc * rc;
-    let k_rf = (eps_rf - 1.0) / (2.0 * eps_rf + 1.0) / rc3;
-    let c_rf = (3.0 * eps_rf) / (2.0 * eps_rf + 1.0) / rc;
+    let (k_rf, c_rf) = if eps_rf.is_infinite() {
+        (0.5 / rc3, 1.5 / rc)
+    } else {
+        (
+            (eps_rf - 1.0) / (2.0 * eps_rf + 1.0) / rc3,
+            (3.0 * eps_rf) / (2.0 * eps_rf + 1.0) / rc,
+        )
+    };
     let e = ONE_4PI_EPS0 * charge_prod * (1.0 / r + k_rf * r2 - c_rf);
     // dE/dr = ONE_4PI_EPS0 * q1*q2 * (-1/r^2 + 2*k_rf*r)
-    let de_dr_over_r = ONE_4PI_EPS0 * charge_prod * (-1.0 / (r2 * r) + 2.0 * k_rf / r);
+    let de_dr_over_r = ONE_4PI_EPS0 * charge_prod * (-1.0 / (r2 * r) + 2.0 * k_rf);
     (e, de_dr_over_r)
+}
+
+fn validate_particle_parameters(charge: f64, sigma: f64, epsilon: f64) {
+    assert!(
+        charge.is_finite()
+            && sigma.is_finite()
+            && epsilon.is_finite()
+            && sigma >= 0.0
+            && epsilon >= 0.0,
+        "nonbonded parameters must be finite with nonnegative sigma and epsilon"
+    );
+}
+
+fn screened_coulomb(charge: f64, r: f64, r2: f64, alpha: f64) -> (f64, f64) {
+    if charge == 0.0 {
+        return (0.0, 0.0);
+    }
+    let erfc = libm::erfc(alpha * r);
+    let coefficient = ONE_4PI_EPS0 * charge;
+    (
+        coefficient * erfc / r,
+        -coefficient * (erfc / r + 2.0 * alpha / PI.sqrt() * (-alpha * alpha * r2).exp()) / r2,
+    )
+}
+
+fn reciprocal_pair(charge: f64, r: f64, r2: f64, alpha: f64) -> (f64, f64) {
+    let coefficient = ONE_4PI_EPS0 * charge;
+    if alpha * r < 1e-6 {
+        return (
+            coefficient * 2.0 * alpha / PI.sqrt() * (1.0 - alpha * alpha * r2 / 3.0),
+            -coefficient * 4.0 * alpha.powi(3) / (3.0 * PI.sqrt()),
+        );
+    }
+    let erf = libm::erf(alpha * r);
+    (
+        coefficient * erf / r,
+        coefficient * (2.0 * alpha / PI.sqrt() * (-alpha * alpha * r2).exp() - erf / r) / r2,
+    )
+}
+
+fn integrate(function: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
+    fn recurse(
+        f: &impl Fn(f64) -> f64,
+        interval: [f64; 2],
+        values: [f64; 3],
+        estimate: f64,
+        tolerance: f64,
+        depth: u32,
+    ) -> f64 {
+        let [a, b] = interval;
+        let [fa, fm, fb] = values;
+        let midpoint = 0.5 * (a + b);
+        let fl = f(0.5 * (a + midpoint));
+        let fr = f(0.5 * (midpoint + b));
+        let left = (midpoint - a) / 6.0 * (fa + 4.0 * fl + fm);
+        let right = (b - midpoint) / 6.0 * (fm + 4.0 * fr + fb);
+        let difference = left + right - estimate;
+        if depth == 0 || difference.abs() <= 15.0 * tolerance {
+            return left + right + difference / 15.0;
+        }
+        recurse(
+            f,
+            [a, midpoint],
+            [fa, fl, fm],
+            left,
+            0.5 * tolerance,
+            depth - 1,
+        ) + recurse(
+            f,
+            [midpoint, b],
+            [fm, fr, fb],
+            right,
+            0.5 * tolerance,
+            depth - 1,
+        )
+    }
+    let values = [function(a), function(0.5 * (a + b)), function(b)];
+    let estimate = (b - a) / 6.0 * (values[0] + 4.0 * values[1] + values[2]);
+    recurse(
+        function,
+        [a, b],
+        values,
+        estimate,
+        1e-11 * estimate.abs().max(1e-12),
+        20,
+    )
 }
 
 #[cfg(test)]
@@ -527,7 +834,7 @@ mod tests {
         let (forces_t, energy) = Force::<B>::calc_forces_and_energy(&force, &positions, None);
         let f = get_forces(forces_t);
 
-        let expected_f = ONE_4PI_EPS0 * (-0.75) / 4.0;
+        let expected_f = -ONE_4PI_EPS0 * (-0.75) / 4.0;
         assert_relative_eq!(f[0], expected_f, epsilon = 1e-4);
         assert_relative_eq!(f[3], -expected_f, epsilon = 1e-4);
         assert_relative_eq!(energy, ONE_4PI_EPS0 * (-0.75) / 2.0, epsilon = 1e-4);
@@ -548,7 +855,7 @@ mod tests {
         let eps = 2_f64.sqrt(); // sqrt(1*2)
         let x = sigma / 2.0;
         let expected_e = 4.0 * eps * (x.powi(12) - x.powi(6));
-        let expected_f = 4.0 * eps * (12.0 * x.powi(12) - 6.0 * x.powi(6)) / 2.0;
+        let expected_f = 4.0 * eps * (-12.0 * x.powi(12) + 6.0 * x.powi(6)) / 2.0;
 
         assert_relative_eq!(energy, expected_e, epsilon = 1e-4);
         assert_relative_eq!(f[0], expected_f, epsilon = 1e-4);

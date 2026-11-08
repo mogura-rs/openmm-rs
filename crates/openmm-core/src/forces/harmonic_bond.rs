@@ -139,11 +139,13 @@ impl<B: Backend> Force<B> for HarmonicBondForce {
     }
 }
 
-/// Minimum image for orthogonal boxes. delta is r_j - r_i.
+/// Minimum image for a reduced triclinic box. delta is r_j - r_i.
 pub fn apply_minimum_image_ortho(delta: &mut [f64; 3], bv: &[[f64; 3]; 3]) {
-    for d in 0..3 {
-        let l = bv[d][d];
-        delta[d] -= (delta[d] / l).round() * l;
+    for d in (0..3).rev() {
+        let shift = (delta[d] / bv[d][d] + 0.5).floor();
+        for axis in 0..=d {
+            delta[axis] -= shift * bv[d][axis];
+        }
     }
 }
 
