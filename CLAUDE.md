@@ -153,6 +153,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - `QTBIntegrator` — colored quantum noise, adaptive friction spectra, captured physical step size and reusable FFT storage
 - `CustomIntegrator` — programmable steps, nested flow control, scalar/vector expressions, custom kinetic energy and persistent group caches
 - CPU stochastic integration — direct f64 state updates and per-integrator seeded random streams
+- `GBSAOBCForce` — OBC-II solvation, ACE surface energy, cutoff cells, triclinic boxes and live particle updates
 - `NonbondedForce` — cutoff/reaction field, Ewald, PME, LJPME, parameter offsets, switching and dispersion correction
 - Virtual sites — averages, out-of-plane, local coordinates, symmetry and nested dependencies
 - Constraints — sparse SHAKE/RATTLE position and velocity projection

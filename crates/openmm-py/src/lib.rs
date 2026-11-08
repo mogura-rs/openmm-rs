@@ -1,3 +1,5 @@
+mod gbsa_obc;
+use gbsa_obc::PyGBSAOBCForce;
 mod flexible_barostat;
 use flexible_barostat::PyMonteCarloFlexibleBarostat;
 mod membrane_barostat;
@@ -1812,6 +1814,9 @@ impl PySystem {
 }
 
 fn extract_force_snapshot(force: &Bound<'_, PyAny>) -> PyResult<Box<dyn openmm_core::Force<B>>> {
+    if let Ok(force) = force.extract::<PyRef<'_, PyGBSAOBCForce>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
     if let Ok(force) = force.extract::<PyRef<'_, PyMonteCarloAnisotropicBarostat>>() {
         return Ok(Box::new(force.inner.clone()));
     }
@@ -2163,6 +2168,12 @@ impl PyContext {
                 .update_custom_torsion_force_parameters(force_index, inner);
             return Ok(());
         }
+        if let Ok(force) = force.extract::<PyRef<'_, PyGBSAOBCForce>>() {
+            self.inner
+                .borrow_mut()
+                .update_gbsa_obc_force_parameters(force_index, &force.inner);
+            return Ok(());
+        }
         if let Ok(force) = force.extract::<PyRef<'_, PyNonbondedForce>>() {
             let inner = &force.inner;
             self.inner
@@ -2252,6 +2263,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     virtual_sites::register(m)?;
     m.add_class::<PyState>()?;
     integrators::register(m)?;
+    gbsa_obc::register(m)?;
     m.add_class::<PyNonbondedForce>()?;
     m.add_class::<PyCustomExternalForce>()?;
     m.add_class::<PyCustomBondForce>()?;

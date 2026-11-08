@@ -50,6 +50,7 @@ revision in generated validation results.
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
+| Implicit solvation | Partial | GBSA-OBC supports polar/surface forces, three cutoff methods, live particle updates, cell traversal and nested CV use; CustomGB, application parameter assignment and resident GPU execution remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator, Nose-Hoover chains, DPD, QTB and programmable CustomIntegrator have reference comparisons; checkpointing, resident GPU integration and wider molecular validation remain |
 | State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; all four Monte Carlo barostats have CPU implementations and reference fixtures; broader molecular NPT stability and GPU execution remain |
@@ -1358,6 +1359,94 @@ generates unused draws; this contributes to the measured difference.
 | Langevin | 300 | 8 | 260,919 | 252,203 | 4,448 | 8,004 |
 | Langevin | 300 | 4,096 | 680.39 | 580.58 | 5,560 | 8,948 |
 | Langevin | 300 | 65,536 | 42.64 | 36.37 | 18,300 | 26,248 |
+
+## OBC implicit solvation
+
+`GBSAOBCForce` implements OBC-II Born radii, polar solvation and the ACE surface
+term. Rust and Python expose particle charge/radius/scaling parameters, all three
+nonbonded methods, cutoff distance, solute/solvent dielectrics, surface energy,
+force group and name. Python provides both snake_case and OpenMM camelCase names.
+Particle updates affect a bound Context only after an explicit update call;
+method, cutoff, dielectric and surface settings remain those captured at Context
+creation. The force also supports nested CustomCVForce evaluation and updates.
+
+The implementation uses the Reference dielectric offset of 0.009 nm, probe
+radius of 0.14 nm and OBC-II coefficients (1, 0.8, 4.85). Polar self terms use the
+square-root denominator even for negative Born radii, preserving the supplied
+Reference behavior for positive input radii below the offset. This is API/numeric
+coverage, not a recommendation to use those radii. A radius equal to the offset
+makes the model singular. Nonfinite parameters and nonpositive active cutoffs
+are rejected; finite positive radii and scale factors are checked at binding.
+As in Reference, a zero solute or solvent dielectric disables the polar term.
+
+Cutoff methods include pairs exactly at the cutoff, truncate the descreening
+integrals and subtract the constant polar pair energy at the cutoff. The burial
+contribution can still make energy discontinuous there; a switching function is
+not introduced. Periodic evaluation uses the current reduced triclinic box and
+checks its half-width cutoff restriction. Other methods ignore box vectors.
+
+Three pair passes compute descreening sums, polar interactions and the Born-radius
+chain-rule force. Each unordered pair supplies both directed descreening terms.
+Cutoff traversal uses the reusable cell storage, without a stored pair matrix.
+NoCutoff retains quadratic work. The native f64 path borrows positions and reuses
+three scalar arrays, totaling 24 bytes per particle, excluding parameters,
+neighbor storage and the returned force array. The force output transfers its
+allocation directly into the CPU tensor. Nested CV evaluation can instead retain
+one reusable force buffer and accumulate it with the CV coefficient. A warmed
+allocation test checks one particle-sized allocation for a returned force tensor
+and none for direct host accumulation. The f32 backend converts explicitly;
+resident GPU force kernels remain unimplemented.
+
+### Solvation validation
+
+The fixture compares 1,536 states and 474,624 scalar values across methods,
+dielectric/surface settings, unequal and nested radii, fixed particles, direct
+and CV use, force groups, live boxes, parameter updates and short trajectories.
+Maximum absolute differences are 1.57e-11 kJ/mol in energy and 1.71e-12 kJ/mol/nm
+in force. Another 792 finite-difference components agree within 8.30e-8 kJ/mol/nm.
+Six cases check the exact cutoff and its two sides, and two isolated-particle
+cases cover positive radii below the dielectric offset. Native tests also cover
+single-precision input, isolated analytic energies and zero total force.
+
+Two 16-particle systems combine GBSA, Coulomb/Lennard-Jones interactions and
+harmonic bonds for 20,000 steps at 0.0005 ps. At 1 ps, coordinate and velocity
+differences are below 1.51e-12 nm and 4.28e-12 nm/ps. Over 10 ps, Rust's maximum
+energy drift is 1.32e-4 kJ/mol (4.04e-6 relative), and total momentum changes by
+less than 7.6e-14 Da nm/ps. Reference has the same energy-drift scale and momentum
+changes below 3.9e-10 Da nm/ps.
+
+Pointwise trajectory equality is not asserted at 10 ps. The maximum differences
+reach 4.89e-6 nm and 1.80e-5 nm/ps. An independent Reference run perturbs one
+initial coordinate by 1e-12 nm; it subsequently differs by up to 2.36e-6 nm and
+8.47e-6 nm/ps. The short-time parity and sensitivity control are consistent with
+amplification of floating-point differences. Both final differences and controls
+are retained in the validation output. These synthetic systems do not establish
+biomolecular ensemble convergence or production force-field readiness.
+
+### Solvation performance
+
+`scripts/benchmark-gbsa.sh` compares native release builds on a 0.3 nm lattice,
+with varying charge/radius/scale parameters and a 0.8 nm cutoff. Each process
+warms once and times 100, 10 or 1 complete force-and-energy requests for 512,
+2,048 or 8,192 particles. Three independent processes alternate implementation
+order; the table reports median throughput and the largest process peak RSS.
+The summary checks energy and force-norm agreement before accepting timings.
+These measurements include Context overhead and returned force arrays, but do
+not measure integration, solvated biomolecules or GPU execution. One periodic
+2,048-particle Rust sample was slower than the other two (10.00 versus about
+13.27 evaluations/s); raw samples preserve that variation.
+
+| Method | Particles | Rust evaluations/s | Reference evaluations/s | Rust peak RSS KiB | Reference peak RSS KiB |
+|---|---:|---:|---:|---:|---:|
+| NoCutoff | 512 | 55.705 | 44.207 | 4,160 | 7,216 |
+| NoCutoff | 2,048 | 3.381 | 2.660 | 4,644 | 7,780 |
+| NoCutoff | 8,192 | 0.206 | 0.141 | 6,664 | 8,868 |
+| Nonperiodic cutoff | 512 | 229.599 | 132.161 | 4,332 | 7,444 |
+| Nonperiodic cutoff | 2,048 | 50.519 | 10.593 | 4,596 | 7,736 |
+| Nonperiodic cutoff | 8,192 | 10.922 | 0.718 | 6,556 | 8,740 |
+| Periodic cutoff | 512 | 81.276 | 39.449 | 4,200 | 7,268 |
+| Periodic cutoff | 2,048 | 13.266 | 2.932 | 4,692 | 7,716 |
+| Periodic cutoff | 8,192 | 4.223 | 0.191 | 6,704 | 8,720 |
 
 ## Documentation discrepancies found during implementation
 

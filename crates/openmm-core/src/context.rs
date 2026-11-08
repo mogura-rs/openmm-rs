@@ -571,6 +571,15 @@ impl<B: Backend> Context<B> {
         target.update_parameters_from(source);
     }
 
+    pub fn update_gbsa_obc_force_parameters(
+        &mut self,
+        force_index: usize,
+        source: &crate::GBSAOBCForce,
+    ) {
+        self.update_force_parameters_at_path(&[force_index], source)
+            .expect("invalid GBSA force update");
+    }
+
     pub fn update_nonbonded_force_parameters(
         &mut self,
         force_index: usize,
