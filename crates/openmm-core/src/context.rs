@@ -306,6 +306,35 @@ impl<B: Backend> Context<B> {
         target.update_parameters_from(source);
     }
 
+    fn constant_potential_at_path(&self, path: &[usize]) -> &crate::ConstantPotentialForce {
+        let (&index, rest) = path.split_first().expect("force path must not be empty");
+        let mut force = self
+            .system
+            .forces()
+            .get(index)
+            .expect("unknown force index")
+            .as_ref();
+        for &index in rest {
+            force = force
+                .as_any()
+                .downcast_ref::<CustomCVForce<B>>()
+                .expect("force path must traverse CustomCVForce objects")
+                .collective_variable(index);
+        }
+        force
+            .as_any()
+            .downcast_ref::<crate::ConstantPotentialForce>()
+            .expect("force is not a ConstantPotentialForce")
+    }
+    pub fn constant_potential_charges(&self, path: &[usize]) -> Vec<f64> {
+        self.constant_potential_at_path(path)
+            .charges(&self.positions, self.periodic_box_vectors.as_ref())
+    }
+    pub fn constant_potential_pme_parameters(&self, path: &[usize]) -> (f64, [usize; 3]) {
+        self.constant_potential_at_path(path)
+            .pme_parameters_in_context()
+    }
+
     pub fn collective_variable_values(&self, force_index: usize) -> Vec<f64> {
         let force = self
             .system

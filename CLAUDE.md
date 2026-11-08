@@ -158,6 +158,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - `GayBerneForce` — anisotropic ellipsoids, conservative frame derivatives, scalar spherical pairs, cutoff cells and full Reference-style updates
 - `LCPOForce` — surface overlap terms, analytic forces, reusable contact graphs and triangle traversal
 - `GBSAOBCForce` — OBC-II solvation, ACE surface energy, cutoff cells, triclinic boxes and live particle updates
+- `ConstantPotentialForce` — periodic PME, Gaussian electrodes, CG and packed-matrix charge solvers, external fields and total-charge constraints
 - `NonbondedForce` — cutoff/reaction field, Ewald, PME, LJPME, parameter offsets, switching and dispersion correction
 - Virtual sites — averages, out-of-plane, local coordinates, symmetry and nested dependencies
 - Constraints — sparse SHAKE/RATTLE position and velocity projection

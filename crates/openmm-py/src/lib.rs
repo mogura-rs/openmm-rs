@@ -1,3 +1,5 @@
+mod constant_potential;
+use constant_potential::PyConstantPotentialForce;
 mod custom_many;
 use custom_many::PyCustomManyParticleForce;
 mod custom_gb;
@@ -1822,6 +1824,10 @@ impl PySystem {
 }
 
 fn extract_force_snapshot(force: &Bound<'_, PyAny>) -> PyResult<Box<dyn openmm_core::Force<B>>> {
+    if let Ok(force) = force.extract::<PyRef<'_, PyConstantPotentialForce>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
+
     if let Ok(force) = force.extract::<PyRef<'_, PyCustomManyParticleForce>>() {
         return Ok(Box::new(force.snapshot()?));
     }
@@ -2092,6 +2098,16 @@ impl PyContext {
         })
     }
 
+    fn get_constant_potential_charges(&self, path: Vec<usize>) -> Vec<f64> {
+        self.inner.borrow().constant_potential_charges(&path)
+    }
+    fn get_constant_potential_pme_parameters(
+        &self,
+        path: Vec<usize>,
+    ) -> (f64, usize, usize, usize) {
+        let (alpha, [nx, ny, nz]) = self.inner.borrow().constant_potential_pme_parameters(&path);
+        (alpha, nx, ny, nz)
+    }
     fn get_collective_variable_values(&self, force_index: usize) -> Vec<f64> {
         self.inner.borrow().collective_variable_values(force_index)
     }
@@ -2323,6 +2339,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyOrientationRestraintForce>()?;
     m.add_class::<PyCustomVolumeForce>()?;
     m.add_class::<PyCustomCVForce>()?;
+    constant_potential::register(m)?;
     m.add_class::<PyCMMotionRemover>()?;
     m.add_class::<PyAndersenThermostat>()?;
     barostat::register(m)?;

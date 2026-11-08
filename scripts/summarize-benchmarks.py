@@ -55,6 +55,9 @@ def main():
             assert math.isclose(record["energy"], expected, rel_tol=1e-8, abs_tol=1e-6), records
             if "force_squared_norm" in record:
                 assert math.isclose(record["force_squared_norm"], records[0]["force_squared_norm"], rel_tol=1e-8, abs_tol=1e-6), records
+            if "charge_squared_norm" in record:
+                assert math.isclose(record["charge_squared_norm"], records[0]["charge_squared_norm"], rel_tol=1e-8, abs_tol=1e-8), records
+                assert abs(record["total_charge"]-0.25) < 1e-10, record
             if "derivative_squared_norm" in record:
                 assert math.isclose(record["derivative_squared_norm"], records[0]["derivative_squared_norm"], rel_tol=1e-8, abs_tol=1e-6), records
             if record.get("integrator", "").startswith("nose_") or (record.get("integrator") == "dpd" and record["temperature"] == 0):
@@ -73,11 +76,19 @@ def main():
                   "max_process_peak_rss_kib": max(row["process_peak_rss_kib"] for row in rows)}
             for key, rows in implementations.items()
         }
+    for particles, records in groups.items():
+        if all("first_evaluation_seconds" in record for record in records):
+            for key, summary in summaries[particles].items():
+                rows = [record for record in records if "/".join(str(record[field]) for field in ["implementation", "api", "traversal", "cache_mode"] if field in record) == key]
+                summary["median_first_evaluation_seconds"] = statistics.median(row["first_evaluation_seconds"] for row in rows)
+                summary["median_setup_seconds"] = statistics.median(row["setup_seconds"] for row in rows)
     note = "Single-process CPU force/energy benchmark against OpenMM Reference; process RSS includes runtime and library overhead. Optimized OpenMM CPU/CUDA platforms and integration throughput are not measured here."
     if all(record.get("force") == "gbsa_obc" for rows in groups.values() for record in rows):
         note = "Matched f64 GBSA-OBC force/energy queries on a 0.3 nm cubic lattice, with one warmup evaluation. The box side is ceil(cuberoot(N))*0.3 nm and the cutoff is 0.8 nm. Charges, radii and scaling factors vary periodically by particle index. Energy and squared force norm are compared across implementations. Rust uses cell candidates for cutoff methods; the supplied Reference kernel scans all particle pairs. NoCutoff remains quadratic. Timings exclude construction; process RSS includes runtime, Context storage and one final force snapshot. This is an implicit-solvent force benchmark, not a complete molecular simulation or GPU comparison."
     if all(record.get("force") == "lcpo" for rows in groups.values() for record in rows):
         note = "Matched f64 LCPO force/energy evaluation on a 0.3 nm cubic lattice with one warmup and three processes per condition. Radii vary from 0.2 to 0.28 nm; coefficients are (0.7,-0.2,0.08,0.1) and surface tension is 1 kJ/mol/nm^2. Method 0 is nonperiodic and method 1 is periodic. Energy and squared force norm are checked across implementations. Rust stores contact edges and visits each triangle once; Reference builds per-particle maps and visits directed neighbor pairs. Construction is excluded from timing; peak RSS includes reusable workspaces, Context snapshots and runtime overhead. This is a surface-potential benchmark, not a complete molecular simulation or GPU comparison."
+    if all(record.get("force") == "constant_potential" for rows in groups.values() for record in rows):
+        note = "Matched f64 constant-potential coordinate updates and force/energy queries on a jittered 0.32 nm lattice. One quarter of particles form two fixed electrodes with potentials +2/-2 kJ/mol/e, Gaussian widths 0.08/0.10 nm and Thomas-Fermi scales 0.005/nm. The total charge is constrained to 0.25 e and the field is (0.1,-0.05,0.08) kJ/mol/nm/e. Every timed query changes all solute coordinates smoothly, requiring a new charge solution. Solver 0 is unpreconditioned CG, solver 1 preconditioned CG, and solver 2 a cached packed-matrix solve in Rust. CG tolerance is 1e-8 kJ/mol/e, cutoff 0.8 nm, alpha 3/nm and cubic mesh size max(16,nextPowerOfTwo(ceil(6*boxSide))). Each condition has one warmup and three processes. Energy, force norm, charge norm and total charge are checked for every process. Setup through warmup and the first query are timed separately; process peak RSS includes them. This measures synthetic moving-solute force queries against Reference, not optimized CPU/GPU platforms or molecular sampling."
     if all(record.get("force") == "custom_many" for rows in groups.values() for record in rows):
         note = "Matched f64 three-particle force/energy queries on a jittered 0.32 nm lattice, with one warmup and three processes per condition. Model 0 uses a symmetric product of exponential pair distances; model 1 uses a central-particle angular expression. Per-particle amplitudes vary by index and lambda is 0.7. Cutoff methods use 0.65 nm. NoCutoff measures 32/64/128 particles and cutoff methods measure 128/256/512; the reference enumerates all triples even with a cutoff. Rust enumerates clique or neighbor-star candidates from reusable sparse adjacency storage. Energies and squared force norms are compared for every measured process. Timings exclude construction; process peak RSS includes retained workspaces and runtime overhead. This is a synthetic many-particle force benchmark, not complete molecular dynamics or optimized OpenMM CPU/GPU performance."
     if all(record.get("force") == "gay_berne" for rows in groups.values() for record in rows):

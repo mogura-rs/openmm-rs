@@ -46,12 +46,95 @@ impl PmeCache {
         }
         guard.as_mut().unwrap().evaluate(
             positions,
-            particles,
+            particles.iter().map(|particle| {
+                if self.dispersion {
+                    2.0 * particle.epsilon.sqrt() * particle.sigma.powi(3)
+                } else {
+                    particle.charge
+                }
+            }),
             box_vectors,
             alpha,
             forces,
             self.dispersion,
         )
+    }
+
+    pub(crate) fn evaluate_charges(
+        &self,
+        positions: &[f64],
+        charges: &[f64],
+        box_vectors: &[[f64; 3]; 3],
+        parameters: (f64, [usize; 3]),
+        forces: &mut [f64],
+    ) -> f64 {
+        let (alpha, dimensions) = parameters;
+        let mut guard = self.workspace.lock().unwrap();
+        if guard
+            .as_ref()
+            .is_none_or(|work| work.dimensions != dimensions)
+        {
+            *guard = Some(Workspace::new(dimensions));
+        }
+        guard.as_mut().unwrap().evaluate(
+            positions,
+            charges.iter().copied(),
+            box_vectors,
+            alpha,
+            forces,
+            false,
+        )
+    }
+
+    pub(crate) fn charge_derivatives(
+        &self,
+        positions: &[f64],
+        charges: &[f64],
+        box_vectors: &[[f64; 3]; 3],
+        parameters: (f64, [usize; 3]),
+        indices: &[usize],
+        derivatives: &mut [f64],
+    ) {
+        assert!(
+            !self.dispersion,
+            "charge derivatives require electrostatic PME"
+        );
+        assert_eq!(indices.len(), derivatives.len());
+        let (alpha, dimensions) = parameters;
+        let mut guard = self.workspace.lock().unwrap();
+        if guard
+            .as_ref()
+            .is_none_or(|work| work.dimensions != dimensions)
+        {
+            *guard = Some(Workspace::new(dimensions));
+        }
+        let work = guard.as_mut().unwrap();
+        work.potential(
+            positions,
+            charges.iter().copied(),
+            box_vectors,
+            alpha,
+            false,
+        );
+        let reciprocal = reciprocal_box(box_vectors).0;
+        let [nx, ny, nz] = dimensions;
+        for (&particle, derivative) in indices.iter().zip(derivatives) {
+            let (base, weights, _) = stencil(
+                &positions[3 * particle..3 * particle + 3],
+                &reciprocal,
+                dimensions,
+            );
+            for ix in 0..5 {
+                for iy in 0..5 {
+                    for iz in 0..5 {
+                        let index = (((base[0] + ix) % nx) * ny + (base[1] + iy) % ny) * nz
+                            + (base[2] + iz) % nz;
+                        *derivative +=
+                            work.grid[index].re * weights[0][ix] * weights[1][iy] * weights[2][iz];
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -219,27 +302,18 @@ impl Workspace {
         }
     }
 
-    fn evaluate(
+    fn potential(
         &mut self,
         positions: &[f64],
-        particles: &[ParticleParam],
+        amplitudes: impl Iterator<Item = f64> + Clone,
         box_vectors: &[[f64; 3]; 3],
         alpha: f64,
-        forces: &mut [f64],
         dispersion: bool,
     ) -> f64 {
-        let amplitude = |particle: &ParticleParam| {
-            if dispersion {
-                2.0 * particle.epsilon.sqrt() * particle.sigma.powi(3)
-            } else {
-                particle.charge
-            }
-        };
         let (reciprocal, volume) = reciprocal_box(box_vectors);
         let [nx, ny, nz] = self.dimensions;
         self.grid.fill(Complex64::default());
-        for (position, particle) in positions.chunks_exact(3).zip(particles) {
-            let charge = amplitude(particle);
+        for (position, charge) in positions.chunks_exact(3).zip(amplitudes) {
             if charge == 0.0 {
                 continue;
             }
@@ -297,12 +371,32 @@ impl Workspace {
             }
         }
         self.transform(true);
-        for ((position, particle), force) in positions
+        energy
+    }
+
+    fn evaluate(
+        &mut self,
+        positions: &[f64],
+        amplitudes: impl Iterator<Item = f64> + Clone,
+        box_vectors: &[[f64; 3]; 3],
+        alpha: f64,
+        forces: &mut [f64],
+        dispersion: bool,
+    ) -> f64 {
+        let energy = self.potential(
+            positions,
+            amplitudes.clone(),
+            box_vectors,
+            alpha,
+            dispersion,
+        );
+        let reciprocal = reciprocal_box(box_vectors).0;
+        let [nx, ny, nz] = self.dimensions;
+        for ((position, charge), force) in positions
             .chunks_exact(3)
-            .zip(particles)
+            .zip(amplitudes)
             .zip(forces.chunks_exact_mut(3))
         {
-            let charge = amplitude(particle);
             if charge == 0.0 {
                 continue;
             }
@@ -334,6 +428,60 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn charge_derivatives_match_reciprocal_energy_differences() {
+        let cache = PmeCache::default();
+        let positions = [0.1, 0.2, 0.3, 0.7, 0.4, 1.2, 1.4, 0.3, 0.8];
+        for tilt in [0., 0.35] {
+            let vectors = [[3., 0., 0.], [tilt, 3.2, 0.], [-tilt, 0.1, 3.4]];
+            let parameters = (2.4, [12, 14, 16]);
+            let mut charges = [0., 0.3, -0.4];
+            let mut derivatives = [0.; 3];
+            cache.charge_derivatives(
+                &positions,
+                &charges,
+                &vectors,
+                parameters,
+                &[0, 1, 2],
+                &mut derivatives,
+            );
+            let mut forces = [0.; 9];
+            let energy =
+                cache.evaluate_charges(&positions, &charges, &vectors, parameters, &mut forces);
+            assert!(
+                (energy
+                    - 0.5
+                        * charges
+                            .iter()
+                            .zip(derivatives)
+                            .map(|(q, d)| q * d)
+                            .sum::<f64>())
+                .abs()
+                    < 1e-12
+            );
+            for i in 0..3 {
+                let original = charges[i];
+                charges[i] = original + 1e-5;
+                let plus = cache.evaluate_charges(
+                    &positions,
+                    &charges,
+                    &vectors,
+                    parameters,
+                    &mut [0.; 9],
+                );
+                charges[i] = original - 1e-5;
+                let minus = cache.evaluate_charges(
+                    &positions,
+                    &charges,
+                    &vectors,
+                    parameters,
+                    &mut [0.; 9],
+                );
+                charges[i] = original;
+                assert!(((plus - minus) / 2e-5 - derivatives[i]).abs() < 2e-8);
+            }
+        }
+    }
     #[test]
     fn spline_partition_and_derivatives() {
         for fraction in [0.0, 0.13, 0.5, 0.999] {

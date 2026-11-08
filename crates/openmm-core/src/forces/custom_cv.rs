@@ -406,6 +406,7 @@ pub(crate) fn update_force_parameters<B: Backend>(
     update!(crate::CustomCompoundBondForce);
     update!(crate::CustomCentroidBondForce);
     update!(crate::CustomHbondForce);
+    update!(crate::ConstantPotentialForce);
     update!(CustomCVForce<B>);
     Err("this force does not support parameter updates".to_owned())
 }

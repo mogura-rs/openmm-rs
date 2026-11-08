@@ -52,6 +52,7 @@ revision in generated validation results.
 | Custom forces | Partial | Twelve force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond, GB, many-particle and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Implicit solvation | Partial | GBSA-OBC and programmable CustomGB support polar/surface forces, three cutoff methods, particle updates, cell traversal and nested CV use; application parameter assignment and resident GPU execution remain |
 | Anisotropic particles | Partial | Gay-Berne energies, conservative orientation forces, exceptions and live updates are implemented; source-force exceptions are explicit; resident GPU execution remains |
+| Conducting electrodes | Partial | Constant-potential PME, CG and packed-matrix charge solvers, external fields, total-charge constraints, parameter updates and CPU comparisons are implemented; molecular preparation and resident GPU execution remain |
 | Surface area | Partial | LCPO overlap energies, analytic forces, periodic distances and parameter updates are implemented; application parameter assignment and resident GPU execution remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator, Nose-Hoover chains, DPD, QTB and programmable CustomIntegrator have reference comparisons; checkpointing, resident GPU integration and wider molecular validation remain |
@@ -1899,6 +1900,164 @@ variation from scheduling and CPU frequency. These are synthetic Reference-platf
 force queries; optimized OpenMM CPU/GPU platforms and complete MD throughput are
 outside this measurement.
 
+## Constant-potential electrostatics
+
+`ConstantPotentialForce` implements periodic PME electrostatics with fixed solute
+charges and Gaussian electrode charges. The electrode charges minimize the
+quadratic energy at prescribed potentials, with optional Thomas-Fermi terms,
+a uniform external field and a constraint on the total system charge. This
+force does not include Lennard-Jones interactions. A separate force must provide
+them when needed. The core supports f64/f32 output and the Python binding exposes
+both naming conventions, electrode sets, exceptions, charge queries and actual
+Context PME parameters.
+
+The direct electrostatic kernel combines the Ewald and Gaussian charge widths.
+Reciprocal PME, Ewald self energy, neutralizing plasma, Gaussian self energy,
+electrode potentials, Thomas-Fermi energy and the external field contribute to
+the same minimized energy. Cartesian forces use the charge solution held fixed;
+stationarity of the charge solution supplies the corresponding total derivative.
+External-field energy uses the stored, unwrapped coordinates. The field is in
+kJ/mol/nm per proton charge and electrode potentials are in kJ/mol per proton
+charge. The total-charge constraint includes fixed solute charges.
+
+### Charge solvers and storage
+
+The CG solver retains its charge guess and reuses scalar work vectors. It can use
+the source diagonal preconditioner, including the PME, self, plasma, Gaussian and
+Thomas-Fermi diagonal contributions. Constraint projection and drift removal
+follow the Reference iteration. The source has two stopping checks: the projected
+gradient norm and a small matrix-vector step. Rust retains both, including the
+iteration limit. The tolerance therefore controls both tests; the header only
+describes the gradient test.
+
+The matrix solver stores an in-place packed Cholesky factor with
+`K*(K+1)/2` doubles for K electrode particles. It reuses that factor until the
+electrode parameters, electrode positions or box change. Applying the total-charge
+constraint uses a precomputed vector proportional to the inverse matrix times
+an all-ones vector. Electrode masses must be zero for this solver. Manual position
+and box changes rebuild the matrix, matching the source kernel and its tests.
+
+Both solvers share reusable PME transforms and FFT workspace. Charge derivatives
+interpolate the reciprocal potential directly, including at zero-charge particles;
+no force evaluation or finite charge difference is needed. Charge arrays contain
+only one scalar per particle, without unused Lennard-Jones fields. Finite-cutoff
+cell traversal computes fixed-charge interactions immediately and stores energy
+and force coefficients only for pairs involving an electrode. Charge solving and
+final force evaluation reuse those coefficients, avoiding a second cell traversal
+and repeated screening-function evaluations. Charge-only queries omit fixed-charge
+interactions and force coefficients. CG storage is linear in particles plus these pairs and the PME grid. Dense electrode
+clusters can still have quadratically many neighbor pairs. Only the matrix method
+allocates a dense electrode factor.
+
+The allocation regression uses 512 electrode particles for CG and 256 for the
+matrix solver. It bounds matrix storage by the packed triangular size and rejects
+a dense electrode matrix in the CG workspace. After warmup, the host accumulation
+path makes no new dense allocation; the tensor API allocates its returned force
+buffer. The bounds concern allocations inside these fixtures, not process RSS or
+all possible electrode densities.
+
+### Captured state and parameter updates
+
+Context creation captures the method, cutoff, PME alpha/grid, CG tolerance,
+preconditioner selection, charge-constraint enable flag and exception periodicity.
+Changing these settings on the definition requires a new Context. Explicit updates
+copy fixed charges, active exception parameters, electrode parameters, the external
+field and the total-charge target. Updated input charges on electrode particles
+are ignored, preserving the current iterative guess. Charge queries solve for the
+current positions and box independently of force-group selection.
+
+The supplied kernel permits regrouping electrode particles, including a changed
+number of groups, as long as their union stays fixed. It also accepts changes to
+active exception endpoints while retaining the original exclusion graph. An
+initially nonzero exception may become zero and return to a nonzero value; an
+initially zero exception cannot become nonzero. Adding a zero-valued exception
+through an update does not add an exclusion to the captured graph. Rust follows
+these measured implementation boundaries. Reinitialize for a consistently changed
+exclusion topology. Thirty source/Rust update states retain these behaviors as
+explicit probes rather than treating the header's stricter description as the
+kernel behavior.
+
+### Constant-potential validation
+
+The main fixture compares 1,152 states and 100,224 scalar values across three
+solver configurations, constrained/unconstrained charge, one/four electrode
+particles, orthorhombic/triclinic cells, periodic/nonperiodic exceptions, direct
+or nested CV use, four update/trajectory phases and three force-group selections.
+It includes virtual-site force redistribution, a distance constraint, fixed
+particles, explicit parameter changes, changed periodic images, manual electrode
+movement and captured PME settings. At a CG tolerance of 1e-8 kJ/mol/e, maximum
+energy, force and charge differences are 1.07e-14 kJ/mol, 8.96e-10 kJ/mol/nm and
+1.20e-11 e. The actual PME parameters match exactly. A tighter 1e-11 source run
+failed to converge in one condition; the complete comparison uses the same 1e-8
+tolerance in both implementations.
+
+Another 2,016 Cartesian components are checked against finite differences of the
+source energy, with a maximum error of 3.34e-9 kJ/mol/nm. Independent Rust tests
+check reciprocal charge derivatives, agreement with fixed-charge PME Coulomb
+forces, CG/matrix agreement, total charge, relaxed energy gradients, update
+invalidation and f32 output. Regression comparisons retain 41 nonbonded cases,
+360 CV states in two cache modes, and force-group cases after the shared PME
+refactoring.
+
+Six restrained six-particle systems run 5,000 Verlet steps at 0.0004 ps, for 2 ps
+each: three solver configurations with and without the total-charge constraint.
+The maximum total-energy variation is 2.40e-6 kJ/mol in both implementations.
+Final positions and velocities differ by at most 7.17e-12 nm and
+1.30e-11 nm/ps. All pair distances stay below 1.323 nm, within the 1.4 nm cutoff,
+and constrained total charge agrees to the displayed precision. These small
+systems test deterministic propagation and charge equilibration, not electrode
+force-field preparation, bulk sampling convergence or resident GPU execution.
+
+### Constant-potential performance
+
+`scripts/benchmark-constant-potential.sh` measures coordinate updates followed by
+force/energy queries on a jittered 0.32 nm lattice. One quarter of particles form
+two fixed electrodes with potentials +2/-2 kJ/mol/e, Gaussian widths 0.08/0.10 nm
+and Thomas-Fermi scales 0.005/nm. The total charge is constrained to 0.25 e and
+the field is `(0.1,-0.05,0.08)` kJ/mol/nm/e. The cutoff is 0.8 nm and alpha is
+3/nm; the cubic PME mesh is the next power of two above six times the box side,
+with a minimum of 16. Solute coordinates change smoothly on every timed query,
+requiring a new charge solution while keeping the matrix geometry reusable.
+
+Each condition has one warmup, 200/40/10 timed queries for 128/512/2,048 particles
+and three processes. The final energy, squared force norm, squared charge norm
+and total charge are verified for every process. Setup through warmup and the
+first force query are timed separately. Peak RSS includes construction and
+workspace initialization. This is a synthetic CPU comparison with Reference;
+optimized OpenMM CPU/GPU platforms and molecular integration throughput are not
+measured here.
+
+| Solver | Particles | Rust queries/s | Reference queries/s | Speedup | Rust RSS (KiB) | Reference RSS (KiB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| CG | 128 | 213.65 | 50.70 | 4.21 | 4,680 | 7,712 |
+| CG | 512 | 60.32 | 15.45 | 3.90 | 5,192 | 8,000 |
+| CG | 2,048 | 10.17 | 4.08 | 2.50 | 6,384 | 9,564 |
+| Preconditioned CG | 128 | 223.08 | 53.67 | 4.16 | 4,476 | 7,940 |
+| Preconditioned CG | 512 | 62.39 | 16.12 | 3.87 | 5,224 | 8,008 |
+| Preconditioned CG | 2,048 | 9.97 | 3.98 | 2.51 | 6,360 | 9,612 |
+| Matrix | 128 | 750.40 | 295.77 | 2.54 | 4,592 | 7,752 |
+| Matrix | 512 | 137.13 | 83.56 | 1.64 | 5,280 | 8,128 |
+| Matrix | 2,048 | 34.60 | 23.18 | 1.49 | 7,492 | 13,528 |
+
+First-query and setup medians in milliseconds:
+
+| Solver | Particles | Rust first | Reference first | Rust setup | Reference setup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CG | 128 | 6.84 | 20.81 | 7.93 | 22.02 |
+| CG | 512 | 22.76 | 74.97 | 23.05 | 76.05 |
+| CG | 2,048 | 134.24 | 321.83 | 134.83 | 323.79 |
+| Preconditioned CG | 128 | 6.61 | 20.59 | 6.71 | 21.73 |
+| Preconditioned CG | 512 | 18.95 | 73.29 | 19.18 | 74.66 |
+| Preconditioned CG | 2,048 | 135.41 | 339.23 | 136.25 | 340.79 |
+| Matrix | 128 | 12.35 | 35.40 | 12.51 | 36.55 |
+| Matrix | 512 | 68.08 | 386.14 | 68.41 | 387.39 |
+| Matrix | 2,048 | 1414.94 | 4378.37 | 1416.12 | 4380.25 |
+
+Rust is 1.49-4.21 times faster in these conditions and uses less
+process peak RSS. The matrix result benefits from fixed electrode geometry; its
+first query includes matrix construction and factorization. These timings do not
+cover moving electrodes or large dense electrode clusters.
+
 ## Documentation discrepancies found during implementation
 
 - All four Monte Carlo barostat constructor comments call the rigid scaling center a
@@ -2033,6 +2192,20 @@ outside this measurement.
 - The nonbonded-method enum comments describe an all-pairs cutoff without stating
   the central-mode exception. The detailed class description and implementation
   apply center distances only in `UniqueCentralParticle` mode.
+
+- `ConstantPotentialForce.h` restricts the matrix method to unchanged electrode
+  positions and box vectors. The kernel instead requires zero electrode masses
+  and rebuilds its factor after manual position or box changes; its own tests
+  exercise both changes.
+- Its update description omits the external field, which the implementation
+  copies on every update. The header also prohibits electrode regrouping and
+  changed exception endpoints, while the kernel accepts the update cases listed
+  above and retains its original exclusion graph.
+- The CG tolerance comment describes only projected-gradient convergence. The
+  implementation also stops for a sufficiently small matrix-vector step; Rust
+  preserves that additional stopping condition.
+- The `setChargeConstraintTarget()` comment says "Get" although the method sets
+  the target. The getter and setter use the same total-system-charge convention.
 
 Implementation and reference tests take precedence over outdated descriptions.
 

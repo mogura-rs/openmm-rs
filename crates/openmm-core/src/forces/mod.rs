@@ -4,6 +4,7 @@ pub mod anisotropic_barostat;
 pub mod barostat;
 pub mod cm_motion;
 pub mod cmap_torsion;
+pub mod constant_potential;
 pub mod custom_angle;
 pub mod custom_bond;
 pub mod custom_centroid;
