@@ -2,9 +2,13 @@
 //   x(t+dt) = x(t) + F/(m*gamma)*dt + sqrt(2*kT*dt/(m*gamma)) * noise
 //
 // Reference test: openmm/tests/TestBrownianIntegrator.h
+use super::random::GaussianStream;
 use super::{fixed_particles, inverse_masses, Integrator};
-use crate::integrators::langevin::{gaussian_noise, BOLTZMANN};
+use crate::constraints::{ConstraintError, ConstraintSolver};
+use crate::integrators::langevin::BOLTZMANN;
 use burn::prelude::*;
+use rand::Rng;
+use rand_distr::StandardNormal;
 
 pub struct BrownianIntegrator {
     /// Step size in ps.
@@ -15,9 +19,19 @@ pub struct BrownianIntegrator {
     friction: f64,
     constraint_tolerance: f64,
     integration_force_groups: u32,
+    random: GaussianStream,
 }
 
 impl BrownianIntegrator {
+    pub fn random_number_seed(&self) -> i32 {
+        self.random.seed()
+    }
+    /// Set the seed for initialization; zero selects OS entropy.
+    /// Changing the seed does not reset an initialized random stream.
+    pub fn set_random_number_seed(&mut self, seed: i32) {
+        self.random.set_seed(seed);
+    }
+
     pub fn integration_force_groups(&self) -> u32 {
         self.integration_force_groups
     }
@@ -44,6 +58,7 @@ impl BrownianIntegrator {
             friction,
             constraint_tolerance: 1e-5,
             integration_force_groups: u32::MAX,
+            random: GaussianStream::default(),
         }
     }
 
@@ -84,6 +99,10 @@ impl BrownianIntegrator {
 }
 
 impl<B: Backend> Integrator<B> for BrownianIntegrator {
+    fn initialize(&mut self) {
+        self.random.initialize();
+    }
+
     fn integration_force_groups(&self) -> u32 {
         self.integration_force_groups
     }
@@ -98,9 +117,37 @@ impl<B: Backend> Integrator<B> for BrownianIntegrator {
         forces: &Tensor<B, 2>,
         masses: &Tensor<B, 1>,
     ) {
+        let force_scale = self.dt / self.friction;
+        let noise_amplitude = (2.0 * BOLTZMANN * self.temperature * force_scale).sqrt();
+        if super::try_host_step(
+            positions,
+            velocities,
+            forces,
+            masses,
+            |position, velocity, force, mass| {
+                self.random.with_random(|random| {
+                    for (atom, &mass) in mass.iter().enumerate() {
+                        if mass != 0.0 {
+                            let inverse_mass = mass.recip();
+                            let noise_scale = noise_amplitude * inverse_mass.sqrt();
+                            for axis in 0..3 {
+                                let i = 3 * atom + axis;
+                                let previous = position[i];
+                                position[i] = previous
+                                    + force_scale * inverse_mass * force[i]
+                                    + noise_scale * random.sample::<f64, _>(StandardNormal);
+                                velocity[i] = (position[i] - previous) / self.dt;
+                            }
+                        }
+                    }
+                });
+            },
+        )
+        .is_some()
+        {
+            return;
+        }
         let dt = self.dt;
-        let n = masses.dims()[0];
-        let device = masses.device();
 
         // Mobility = 1 / (m * gamma)
         let mobility = inverse_masses(masses) / self.friction;
@@ -112,13 +159,32 @@ impl<B: Backend> Integrator<B> for BrownianIntegrator {
         let kt = BOLTZMANN * self.temperature;
         let diff_scale = (mobility * (2.0 * kt * dt)).sqrt();
 
-        let noise = gaussian_noise::<B>([n, 3], &device);
+        let noise = self.random.tensor(masses);
         let diffusion = noise * diff_scale;
 
         let old_positions = positions.clone();
         *positions = positions.clone() + drift + diffusion;
         *velocities = ((positions.clone() - old_positions) / dt)
             .mask_where(fixed_particles(masses), velocities.clone());
+    }
+
+    fn step_constrained(
+        &self,
+        positions: &mut Tensor<B, 2>,
+        velocities: &mut Tensor<B, 2>,
+        forces: &Tensor<B, 2>,
+        masses: &Tensor<B, 1>,
+        constraints: &ConstraintSolver,
+    ) -> Result<(), ConstraintError> {
+        if constraints.is_empty() {
+            self.step(positions, velocities, forces, masses);
+            return Ok(());
+        }
+        let previous = positions.clone();
+        self.step(positions, velocities, forces, masses);
+        constraints.apply_positions(&previous, positions, self.constraint_tolerance)?;
+        super::velocities_from_positions(positions, &previous, velocities, masses, self.dt, false);
+        Ok(())
     }
 
     fn step_size(&self) -> f64 {

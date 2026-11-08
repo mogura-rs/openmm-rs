@@ -15,8 +15,12 @@ def main():
             continue
         record = json.loads(path.read_text())
         if record.get("api") == "Context.step":
-            expected = 1.5 * record["particles"] * (1.380649e-23*6.02214076e23/1000) * 300
-            tolerance = 6 * expected * math.sqrt(2 / (3 * record["particles"]))
+            if "expected_kinetic_energy" in record:
+                expected = record["expected_kinetic_energy"]
+                tolerance = max(1e-9, 1e-10*abs(expected), 6*record["kinetic_energy_stddev"])
+            else:
+                expected = 1.5 * record["particles"] * (1.380649e-23*6.02214076e23/1000) * 300
+                tolerance = 6 * expected * math.sqrt(2 / (3 * record["particles"]))
             assert abs(record["kinetic_energy"]-expected) < tolerance, record
         memory_path = path.with_suffix(".memory.txt")
         for line in memory_path.read_text().splitlines():
@@ -47,6 +51,8 @@ def main():
     note = "Single-process CPU force/energy benchmark against OpenMM Reference; process RSS includes runtime and library overhead. Optimized OpenMM CPU/CUDA platforms and integration throughput are not measured here."
     if all(record.get("api") == "Context.step" for rows in groups.values() for record in rows):
         note = "Single-process f64 integration with AndersenThermostat at 300 K, 37/ps, dt=0.001 ps, no potential forces and 10 warmup steps. Kinetic energy is checked against a six-standard-deviation equilibrium bound; random paths differ. Optimized CPU/GPU platforms are not measured."
+    if all("integrator" in record for rows in groups.values() for record in rows):
+        note = "Matched single-process f64 free-particle integration at dt=0.001 ps with 10 warmup steps. Stochastic friction is 0.7/ps. Kinetic energy is checked against the finite-time Gaussian mean and a six-standard-deviation bound. Random paths differ. Optimized CPU/GPU platforms are not measured."
     result = {"note": note, "cases": groups, "summary": summaries}
     (directory / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))

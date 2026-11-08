@@ -37,7 +37,7 @@ openmm-rs/
     │       ├── units.rs        # uom type aliases
     │       ├── forces/         # Force<B> trait + implementations
     │       └── integrators/    # Integrator<B> trait + implementations
-    └── openmm-py/              # pyo3 thin wrappers (NdArrayBackend fixed)
+    └── openmm-py/              # pyo3 thin wrappers (NdArray<f64> fixed)
 ```
 
 ## Build & Development Commands
@@ -120,7 +120,7 @@ Use analytic gradients for geometric force terms. Custom scalar expressions use 
 
 - All simulation logic lives in `openmm-core`
 - `openmm-py` is a thin `pyo3` translation layer with no business logic
-- Backend is fixed to `NdArrayBackend` in `openmm-py/Cargo.toml`
+- The concrete backend is `NdArray<f64>`, selected in `openmm-py/src/lib.rs`
 - Expose the same top-level API as OpenMM Python: `System`, `Context`, `State`, `*Force`, `*Integrator`
 
 ## Reference Tests
@@ -146,6 +146,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - `VerletIntegrator` — leapfrog
 - `LangevinMiddleIntegrator` — LFMiddle splitting
 - `BrownianIntegrator` — overdamped Langevin
+- CPU stochastic integration — direct f64 state updates and per-integrator seeded random streams
 - `NonbondedForce` — cutoff/reaction field, Ewald, PME, LJPME, parameter offsets, switching and dispersion correction
 - Virtual sites — averages, out-of-plane, local coordinates, symmetry and nested dependencies
 - Constraints — sparse SHAKE/RATTLE position and velocity projection

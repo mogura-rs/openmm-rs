@@ -91,6 +91,52 @@ def binding_probes(om):
         rejects(lambda: empty.create_context(object()))
 
 
+
+def seed_probes(om):
+    for kind in [1, 2]:
+        def run(change_seed):
+            system = om.System()
+            for mass in [1, 2, 3, 0]:
+                system.add_particle(mass)
+            integrator = make_integrator(om, kind, temperature=300)
+            assert integrator.getRandomNumberSeed() == 0
+            integrator.setRandomNumberSeed(-17)
+            assert integrator.get_random_number_seed() == -17
+            context = om.Context(system, integrator)
+            context.set_positions([(0, 0, 0)]*4)
+            if change_seed == "before":
+                integrator.set_random_number_seed(31)
+            integrator.step(1)
+            if change_seed == "after":
+                integrator.set_random_number_seed(31)
+            integrator.step(3)
+            state = context.get_state(positions=True, velocities=True)
+            return state.positions, state.velocities
+        assert run(None) == run("before") == run("after") == run(None)
+        system = om.System()
+        system.add_particle(1)
+        a = make_integrator(om, kind, temperature=300)
+        b = make_integrator(om, kind, temperature=300)
+        a.setRandomNumberSeed(31)
+        b.setRandomNumberSeed(31)
+        first = om.Context(system, a)
+        second = om.Context(system, b)
+        first.set_positions([(0, 0, 0)])
+        second.set_positions([(0, 0, 0)])
+        a.step(3)
+        b.step(3)
+        expected = first.get_state(positions=True, velocities=True)
+        actual = second.get_state(positions=True, velocities=True)
+        assert (actual.positions, actual.velocities) == (expected.positions, expected.velocities)
+        del first
+        gc.collect()
+        rebound = om.Context(system, a)
+        rebound.set_positions([(0, 0, 0)])
+        a.step(3)
+        actual = rebound.get_state(positions=True, velocities=True)
+        assert (actual.positions, actual.velocities) == (expected.positions, expected.velocities)
+
+
 def check_moments(moments, samples, label):
     for value, target, variance in zip(moments, [0, 1, 3], [1, 2, 96]):
         assert abs(value-target) < 6*math.sqrt(variance/samples), (label, moments, samples)
@@ -186,6 +232,7 @@ def main():
                 key, f["phase"], f["steps"], metric, got, want)
             errors[metric].append(abs(got-want))
     binding_probes(om)
+    seed_probes(om)
     reports = statistics(om, [row for row in rows if row.get("statistic")])
     print(json.dumps({"status": "passed", "fixtures": len(fixtures), "binding_probes": "passed",
                       "comparisons": sum(map(len, errors.values())), "statistics": reports,

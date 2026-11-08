@@ -44,6 +44,10 @@ impl ContextLink {
 struct SharedIntegrator<T>(Arc<Mutex<T>>);
 
 impl<T: Integrator<B>> Integrator<B> for SharedIntegrator<T> {
+    fn initialize(&mut self) {
+        self.0.lock().unwrap().initialize();
+    }
+
     fn integration_force_groups(&self) -> u32 {
         self.0.lock().unwrap().integration_force_groups()
     }
@@ -174,6 +178,12 @@ integrator_class!(
                 step_size,
             )))
         }
+        fn get_random_number_seed(&self) -> i32 {
+            self.inner.lock().unwrap().random_number_seed()
+        }
+        fn set_random_number_seed(&self, seed: i32) {
+            self.inner.lock().unwrap().set_random_number_seed(seed);
+        }
         #[getter]
         fn temperature(&self) -> f64 {
             self.read_temperature()
@@ -218,6 +228,12 @@ integrator_class!(
                 friction,
                 step_size,
             )))
+        }
+        fn get_random_number_seed(&self) -> i32 {
+            self.inner.lock().unwrap().random_number_seed()
+        }
+        fn set_random_number_seed(&self, seed: i32) {
+            self.inner.lock().unwrap().set_random_number_seed(seed);
         }
         #[getter]
         fn temperature(&self) -> f64 {
@@ -299,6 +315,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     ] {
         for (snake, camel) in [
             ("get_step_size", "getStepSize"),
+            ("get_random_number_seed", "getRandomNumberSeed"),
+            ("set_random_number_seed", "setRandomNumberSeed"),
             ("get_temperature", "getTemperature"),
             ("get_friction", "getFriction"),
             ("set_step_size", "setStepSize"),

@@ -43,6 +43,7 @@ pub struct Context<B: Backend> {
     host_masses: Vec<f64>,
     virtual_sites: VirtualSitePlan,
     molecules: OnceLock<Vec<Vec<usize>>>,
+    empty_forces: OnceLock<Tensor<B, 2>>,
 }
 
 impl<B: Backend> Context<B> {
@@ -58,7 +59,7 @@ impl<B: Backend> Context<B> {
 
     pub fn new(
         mut system: System<B>,
-        integrator: Box<dyn Integrator<B>>,
+        mut integrator: Box<dyn Integrator<B>>,
         device: B::Device,
     ) -> Self {
         let n = system.num_particles();
@@ -80,6 +81,7 @@ impl<B: Backend> Context<B> {
         let virtual_sites = VirtualSitePlan::new(system.virtual_sites(), &masses);
         let constraints = ConstraintSolver::new(system.constraints(), &masses)
             .unwrap_or_else(|error| panic!("{error}"));
+        integrator.initialize();
         let host_masses = masses;
         let masses = crate::tensor::from_floats::<B, 1>(host_masses.as_slice(), &device);
         let mut parameters = HashMap::new();
@@ -110,6 +112,7 @@ impl<B: Backend> Context<B> {
             host_masses,
             virtual_sites,
             molecules: OnceLock::new(),
+            empty_forces: OnceLock::new(),
         }
     }
 
@@ -584,8 +587,14 @@ impl<B: Backend> Context<B> {
             }
         }
 
-        let mut total_forces =
-            total_forces.unwrap_or_else(|| crate::tensor::zeros([n, 3], &self.device));
+        let Some(mut total_forces) = total_forces else {
+            return (
+                self.empty_forces
+                    .get_or_init(|| crate::tensor::zeros([n, 3], &self.device))
+                    .clone(),
+                total_energy,
+            );
+        };
         self.virtual_sites.distribute_forces(
             self.system.virtual_sites(),
             &self.positions,

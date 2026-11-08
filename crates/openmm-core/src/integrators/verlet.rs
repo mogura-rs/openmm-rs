@@ -1,4 +1,4 @@
-// VerletIntegrator: velocity Verlet algorithm.
+// OpenMM leapfrog Verlet integrator.
 // Assumes forces are already computed for the current positions.
 // The step() call here implements the "leapfrog" variant:
 //   v(t+dt/2) = v(t-dt/2) + F(t)/m * dt

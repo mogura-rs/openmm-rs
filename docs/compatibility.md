@@ -124,6 +124,26 @@ second Context. The integrator uses a weak link to the Context, so keeping the
 integrator does not create a reference cycle. Dropping the Context releases the
 binding; stepping an unbound integrator raises an error, and rebinding after
 release is a safe lifetime extension.
+LFMiddle and Brownian capture a per-integrator ChaCha12 random stream at Context
+initialization. Nonzero seeds reproduce Rust runs independently of how other
+Contexts are stepped; seed zero uses OS entropy. Changing the seed afterward,
+including before the first step, changes the initialization setting and leaves the
+active stream unchanged. A new binding initializes a new stream. Both precisions
+consume Gaussian samples in the same massive-particle order, while floating-point
+results retain their backend precision. Other backends receive host-generated
+noise tensors; resident GPU random-number generation remains unimplemented.
+
+On the f64 CPU backend, both stochastic integrators update unique position and
+velocity storage directly and preserve shared State snapshots through copy-on-write.
+LFMiddle retains velocity projection before its drift/thermostat/drift sequence,
+then applies position projection and velocity correction. Brownian velocities are
+reconstructed from the final constrained displacement. Single precision and other
+backends retain tensor operations. When no selected force contributes, Context
+reuses an immutable zero-force tensor. It initializes that cache only when needed.
+Allocation tests verify that warmed, unconstrained f64 integration uses no new dense
+arrays, both directly and through a free-particle Context. Constrained projection
+still uses temporary state storage.
+
 Integrator getters/setters provide both snake_case and OpenMM camelCase names;
 the existing scalar properties remain available. Other classes still need API
 naming/signature coverage. Inputs retain the core's finite-value checks: timestep
@@ -308,7 +328,7 @@ At 13,824 particles, the three-repetition measurements were:
 RSS is the maximum across the three processes. These results use the scripted
 coordinate workload and the Reference platform; they do not establish GPU or
 optimized OpenMM CPU performance. The current code passed all 20 reference
-fixtures with 513,719 scalar comparisons, 120 Rust tests and a build with the
+fixtures with 513,719 scalar comparisons, 126 Rust tests and a build with the
 default backend feature disabled.
 
 `scripts/benchmark-cv.sh` measures a weighted mean of disjoint RG selections,
@@ -341,8 +361,8 @@ each final kinetic energy must lie within six equilibrium standard deviations.
 
 | Particles | Rust median steps/s | Reference median steps/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
 | ---: | ---: | ---: | ---: | ---: |
-| 4,096 | 17,068 | 7,948 | 4,908 | 7,668 |
-| 65,536 | 1,112 | 493 | 19,176 | 22,188 |
+| 4,096 | 18,110 | 7,891 | 4,864 | 7,860 |
+| 65,536 | 1,195 | 492 | 17,564 | 22,216 |
 
 The initial implementation reached 164 steps/s and 28,476 KiB at 65,536 particles.
 The CPU f64 Verlet update now reads forces and masses through borrowed views and
@@ -373,34 +393,68 @@ GPU jobs must run through Slurm. Use at most two nodes concurrently across all
 jobs for this project. Generated builds, logs, trajectories and benchmark results
 belong under ignored directories.
 
-## Python integration overhead
+## CPU integration performance
 
-Python Context/Integrator binding was measured against the preceding copied-integrator
-implementation with release builds, identical free particles, zero temperature,
-0.001 ps steps, ten warm-up steps and three repetitions. This measures binding
-overhead; it is not a comparison with OpenMM Reference or its optimized platforms.
-The script `scripts/benchmark-python-integrator.py` accepts an extension, integrator,
-particle count and step count and checks the final kinetic energy.
+`scripts/benchmark-stochastic.sh` compares native Context stepping against OpenMM
+Reference for free particles, 0.001 ps steps, friction 0.7/ps and initial velocities
+(0.1, 0.2, 0.3) nm/ps. It uses ten warmup steps and three process repetitions per
+case. The timed step counts are 30,000, 1,500 and 200 at 8, 4,096 and 65,536
+particles. Langevin and Brownian run at both 0 K and 300 K; Verlet has no thermostat.
+Final kinetic energies are checked against deterministic expectations or six
+standard deviations of the finite-time Gaussian distribution. Random generators
+and paths differ across implementations. The table shows median throughput and
+maximum process RSS across the three repetitions, using the 300 K stochastic cases.
 
-| Integrator | Particles | Previous steps/s | Shared steps/s | Previous/shared peak RSS (KiB) |
+| Integrator | Particles | Rust steps/s | Reference steps/s | Rust peak RSS, KiB | Reference peak RSS, KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Verlet | 8 | 2,100,968 | 3,383,615 | 3,784 | 7,004 |
+| Verlet | 4,096 | 40,255 | 10,990 | 4,804 | 7,432 |
+| Verlet | 65,536 | 2,844 | 675 | 15,944 | 17,748 |
+| LFMiddle | 8 | 1,104,659 | 1,347,205 | 4,000 | 7,268 |
+| LFMiddle | 4,096 | 6,129 | 3,530 | 4,948 | 7,696 |
+| LFMiddle | 65,536 | 388 | 226 | 16,256 | 20,932 |
+| Brownian | 8 | 1,160,727 | 1,478,042 | 4,004 | 7,080 |
+| Brownian | 4,096 | 6,809 | 3,696 | 4,988 | 7,456 |
+| Brownian | 65,536 | 429 | 231 | 16,192 | 19,608 |
+
+Rust is faster for the two larger sizes and uses less peak process memory in these
+cases. At eight particles, Reference remains faster for all three integrators.
+These measurements cover free particles on the Reference platform; molecular
+force fields, constrained workloads and optimized CPU/GPU platforms remain
+separate performance requirements.
+
+`scripts/benchmark-python-integrator.py` measures Python stepping against the
+preceding implementation with shared Context bindings and tensor-based stochastic
+updates. The script accepts an extension, integrator, particle count and step
+count. Both versions use release builds, free particles, zero temperature,
+0.001 ps steps, ten warmup steps and three repetitions. It checks final kinetic
+energy. This isolates the change in CPU integration and empty-force caching;
+it is not a comparison with the OpenMM Python wrapper.
+
+| Integrator | Particles | Previous steps/s | Current steps/s | Previous/current peak RSS, KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Verlet | 8 | 1,714,130 | 1,563,074 | 23,832 / 23,980 |
-| Verlet | 4,096 | 35,402 | 35,644 | 24,004 / 23,964 |
-| Verlet | 65,536 | 2,361 | 2,363 | 43,812 / 43,784 |
-| LFMiddle | 8 | 137,997 | 133,002 | 23,960 / 23,904 |
-| LFMiddle | 4,096 | 1,630 | 1,571 | 23,900 / 23,964 |
-| LFMiddle | 65,536 | 93.0 | 90.3 | 46,800 / 46,988 |
-| Brownian | 8 | 167,136 | 163,495 | 23,588 / 23,876 |
-| Brownian | 4,096 | 1,753 | 1,716 | 23,624 / 24,060 |
-| Brownian | 65,536 | 101.0 | 97.9 | 46,944 / 47,228 |
+| Verlet | 8 | 1,617,572.5 | 1,523,627.0 | 23,976 / 23,972 |
+| Verlet | 4,096 | 36,193.3 | 40,741.6 | 24,084 / 24,160 |
+| Verlet | 65,536 | 2,364.3 | 2,752.8 | 43,760 / 44,288 |
+| LFMiddle | 8 | 130,669.4 | 1,094,259.2 | 23,996 / 23,824 |
+| LFMiddle | 4,096 | 1,572.6 | 6,260.3 | 23,968 / 23,996 |
+| LFMiddle | 65,536 | 89.8 | 391.9 | 47,184 / 44,292 |
+| Brownian | 8 | 163,687.7 | 1,136,759.9 | 24,092 / 24,088 |
+| Brownian | 4,096 | 1,696.1 | 6,953.8 | 24,052 / 23,988 |
+| Brownian | 65,536 | 97.8 | 431.9 | 47,192 / 44,404 |
 
-Shared settings add synchronization around integrator access. The eight-particle
-Verlet case is about 9% slower; larger Verlet cases are similar. LFMiddle and
-Brownian are about 2-4% slower in this measurement, and still use tensor operations
-and backend-generated random arrays. CPU stochastic integration and small-system
-overhead remain performance work. Peak RSS here includes the Python process.
+Throughput is the median and RSS the maximum across three processes, including
+Python. Stochastic integration improves by about 4 to 8 times. Eight-particle
+Verlet is about 6% slower in this measurement, while the larger cases improve.
+Small-system overhead remains optimization work.
 
 ## Documentation discrepancies found during implementation
+
+- The original Verlet header called its update velocity Verlet, but the stored
+  velocity and update equations implement leapfrog. The header now names leapfrog.
+- The binding guide named `NdArrayBackend` and placed the concrete type in Cargo
+  configuration. The actual alias is `NdArray<f64>` in the binding source; the
+  guide now identifies that location.
 
 - `CLAUDE.md` lists NonbondedForce, Custom forces and Python bindings as future
   work, although partial implementations already exist.

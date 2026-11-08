@@ -1,5 +1,6 @@
 pub mod brownian;
 pub mod langevin;
+mod random;
 pub mod verlet;
 
 use crate::constraints::{ConstraintError, ConstraintSolver};
@@ -25,6 +26,9 @@ pub(crate) fn fixed_particles<B: Backend>(masses: &Tensor<B, 1>) -> Tensor<B, 2,
 
 /// Time-stepping algorithm. Operates on raw tensors (nm, nm/ps).
 pub trait Integrator<B: Backend>: Send + Sync {
+    /// Initialize internal state when attaching to a Context.
+    fn initialize(&mut self) {}
+
     fn integration_force_groups(&self) -> u32 {
         u32::MAX
     }
@@ -72,12 +76,79 @@ pub trait Integrator<B: Backend>: Send + Sync {
         self.step(positions, velocities, forces, masses);
         let proposed = positions.clone();
         constraints.apply_positions(&previous, positions, self.constraint_tolerance())?;
-        *velocities = velocities.clone() + (positions.clone() - proposed) / self.step_size();
+        velocities_from_positions(
+            positions,
+            &proposed,
+            velocities,
+            masses,
+            self.step_size(),
+            true,
+        );
         Ok(())
     }
 
     /// Offset between positions and stored velocities in ps.
     fn velocity_time_offset(&self) -> f64 {
         0.0
+    }
+}
+
+#[inline]
+pub(crate) fn try_host_step<B: Backend, R>(
+    positions: &mut Tensor<B, 2>,
+    velocities: &mut Tensor<B, 2>,
+    forces: &Tensor<B, 2>,
+    masses: &Tensor<B, 1>,
+    update: impl FnOnce(&mut [f64], &mut [f64], &[f64], &[f64]) -> R,
+) -> Option<R> {
+    crate::tensor::with_ndarray_f64(forces, |force| {
+        crate::tensor::with_ndarray_f64(masses, |mass| {
+            crate::tensor::with_mut_ndarray_f64(velocities, |velocity| {
+                crate::tensor::with_mut_ndarray_f64(positions, |position| {
+                    update(position, velocity, force, mass)
+                })
+            })
+            .flatten()
+        })
+        .flatten()
+    })
+    .flatten()
+}
+
+pub(crate) fn velocities_from_positions<B: Backend>(
+    positions: &Tensor<B, 2>,
+    previous: &Tensor<B, 2>,
+    velocities: &mut Tensor<B, 2>,
+    masses: &Tensor<B, 1>,
+    step_size: f64,
+    add: bool,
+) {
+    let updated = crate::tensor::with_ndarray_f64(positions, |position| {
+        crate::tensor::with_ndarray_f64(previous, |previous| {
+            crate::tensor::with_ndarray_f64(masses, |mass| {
+                crate::tensor::with_mut_ndarray_f64(velocities, |velocity| {
+                    for (atom, &mass) in mass.iter().enumerate() {
+                        if mass != 0.0 {
+                            for axis in 0..3 {
+                                let i = 3 * atom + axis;
+                                let change = (position[i] - previous[i]) / step_size;
+                                velocity[i] = if add { velocity[i] + change } else { change };
+                            }
+                        }
+                    }
+                })
+            })
+            .flatten()
+        })
+        .flatten()
+    })
+    .flatten();
+    if updated.is_none() {
+        let change = (positions.clone() - previous.clone()) / step_size;
+        *velocities = if add {
+            velocities.clone() + change
+        } else {
+            change.mask_where(fixed_particles(masses), velocities.clone())
+        };
     }
 }

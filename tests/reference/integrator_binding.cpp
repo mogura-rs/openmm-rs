@@ -99,7 +99,43 @@ void statistics(int kind) {
     }
 }
 
+
+std::vector<Vec3> seededRun(int kind, int changeSeed) {
+    System system;
+    for(double mass : {1.,2.,3.,0.})system.addParticle(mass);
+    std::unique_ptr<Integrator> integrator;
+    if(kind==1) {
+        auto* value=new LangevinMiddleIntegrator(300,0.7,0.0002);
+        value->setRandomNumberSeed(-17);integrator.reset(value);
+    } else {
+        auto* value=new BrownianIntegrator(300,0.7,0.0002);
+        value->setRandomNumberSeed(-17);integrator.reset(value);
+    }
+    Context context(system,*integrator,Platform::getPlatformByName("Reference"));
+    context.setPositions(std::vector<Vec3>(4));
+    if(changeSeed==1) {
+        if(kind==1)dynamic_cast<LangevinMiddleIntegrator&>(*integrator).setRandomNumberSeed(31);
+        else dynamic_cast<BrownianIntegrator&>(*integrator).setRandomNumberSeed(31);
+    }
+    integrator->step(1);
+    if(changeSeed==2) {
+        if(kind==1)dynamic_cast<LangevinMiddleIntegrator&>(*integrator).setRandomNumberSeed(31);
+        else dynamic_cast<BrownianIntegrator&>(*integrator).setRandomNumberSeed(31);
+    }
+    integrator->step(3);
+    return context.getState(State::Velocities).getVelocities();
+}
+
 int main() {
+    for(int kind : {1,2}) {
+        auto original=seededRun(kind,0);
+        for(int mode : {1,2}) {
+            auto changed=seededRun(kind,mode);
+            for(int i=0;i<4;++i)for(int axis=0;axis<3;++axis)
+                if(original[i][axis]!=changed[i][axis])throw std::runtime_error("seed setter changed the active random stream");
+        }
+    }
+
     std::cout << std::setprecision(17);
     for(int kind=0;kind<3;++kind)for(bool constrained : {false,true})run(kind,constrained);
     statistics(1);statistics(2);
