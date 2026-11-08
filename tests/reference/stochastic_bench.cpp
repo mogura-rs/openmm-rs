@@ -2,6 +2,7 @@
 #include <openmm/Context.h>
 #include <openmm/CompoundIntegrator.h>
 #include <openmm/LangevinMiddleIntegrator.h>
+#include <openmm/NoseHooverIntegrator.h>
 #include <openmm/Platform.h>
 #include <openmm/System.h>
 #include <openmm/VerletIntegrator.h>
@@ -12,6 +13,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <sstream>
 using namespace OpenMM;
 int main(int argc,char**argv) {
     std::string kind=argc>1?argv[1]:"langevin";
@@ -33,6 +35,16 @@ int main(int argc,char**argv) {
         }
         integrator.reset(root);
     }
+    else if(kind=="nose_hoover" || kind=="nose_pairs") {
+        auto* value=new NoseHooverIntegrator(0.001);
+        if(kind=="nose_hoover")value->addThermostat(temperature,0.7,3,3,7);
+        else {
+            std::vector<std::pair<int,int>> pairs;
+            for(int a=0;a<n-2;a+=2)pairs.emplace_back(a,a+1);
+            value->addSubsystemThermostat({n-2,n-1},pairs,temperature,0.7,30,2,3,3,7);
+        }
+        integrator.reset(value);
+    }
     else if(kind=="verlet")integrator=std::make_unique<VerletIntegrator>(0.001);
     else if(kind=="variable_verlet") {
         auto* value=new VariableVerletIntegrator(1e-5);value->setMaximumStepSize(0.001);integrator.reset(value);
@@ -47,7 +59,9 @@ int main(int argc,char**argv) {
     } else throw std::runtime_error("unknown integrator");
     Context context(system,*integrator,Platform::getPlatformByName("Reference"));
     context.setPositions(std::vector<Vec3>(n));
-    context.setVelocities(std::vector<Vec3>(n,Vec3(0.1,0.2,0.3)));
+    std::vector<Vec3> initialVelocities(n,Vec3(0.1,0.2,0.3));
+    if(kind.substr(0,5)=="nose_")for(int a=0;a<n;++a)initialVelocities[a]*=(1+a%2);
+    context.setVelocities(initialVelocities);
     auto advance=[&](int steps) {
         if(compound) {
             auto& root=dynamic_cast<CompoundIntegrator&>(*integrator);
@@ -63,6 +77,11 @@ int main(int argc,char**argv) {
     auto start=std::chrono::steady_clock::now();advance(iterations);
     double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
     double energy=context.getState(State::Energy).getKineticEnergy();
+    if(kind=="nose_pairs") {
+        energy=0;
+        auto state=context.getState(State::Velocities);
+        for(const auto& v : state.getVelocities())energy+=0.5*v.dot(v);
+    }
     double kb=1.380649e-23*6.02214076e23/1000,variance=0,meanSquared=0.14*n;
     if(kind=="langevin" || kind=="variable_langevin" || kind=="compound_langevin") {
         double decay=std::exp(-2*0.7*0.001*(iterations+10));
@@ -72,5 +91,6 @@ int main(int argc,char**argv) {
     }
     double expected=0.5*(3*n*variance+meanSquared);
     double stddev=std::sqrt(1.5*n*variance*variance+variance*meanSquared);
-    std::cout<<std::setprecision(17)<<"{\"implementation\":\"openmm-reference\",\"precision\":\"f64\",\"api\":\"Context.step\",\"integrator\":\""<<kind<<"\",\"temperature\":"<<temperature<<",\"particles\":"<<n<<",\"iterations\":"<<iterations<<",\"seconds\":"<<seconds<<",\"evaluations_per_second\":"<<iterations/seconds<<",\"energy\":0,\"kinetic_energy\":"<<energy<<",\"expected_kinetic_energy\":"<<expected<<",\"kinetic_energy_stddev\":"<<stddev<<",\"simulation_time\":"<<context.getTime()<<",\"step_count\":"<<context.getStepCount()<<",\"adaptive\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<",\"maximum_step_size\":0.001,\"error_tolerance\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"0.00001":"null")<<",\"compound_switch_each_step\":"<<(compound?"true":"false")<<",\"clock_repair\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<"}\n";
+    std::ostringstream expectedStream;expectedStream<<std::setprecision(17)<<expected;
+    std::cout<<std::setprecision(17)<<"{\"implementation\":\"openmm-reference\",\"precision\":\"f64\",\"api\":\"Context.step\",\"integrator\":\""<<kind<<"\",\"temperature\":"<<temperature<<",\"particles\":"<<n<<",\"iterations\":"<<iterations<<",\"seconds\":"<<seconds<<",\"evaluations_per_second\":"<<iterations/seconds<<",\"energy\":0,\"kinetic_energy\":"<<energy<<",\"expected_kinetic_energy\":"<<(kind.substr(0,5)=="nose_" ? "null" : expectedStream.str())<<",\"kinetic_energy_stddev\":"<<stddev<<",\"simulation_time\":"<<context.getTime()<<",\"step_count\":"<<context.getStepCount()<<",\"adaptive\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<",\"maximum_step_size\":0.001,\"error_tolerance\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"0.00001":"null")<<",\"compound_switch_each_step\":"<<(compound?"true":"false")<<",\"clock_repair\":"<<((kind=="variable_verlet" || kind=="variable_langevin")?"true":"false")<<"}\n";
 }

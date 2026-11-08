@@ -14,7 +14,9 @@ def main():
         if path.name == "summary.json":
             continue
         record = json.loads(path.read_text())
-        if record.get("api") == "Context.step":
+        if record.get("integrator", "").startswith("nose_"):
+            assert math.isfinite(record["kinetic_energy"]) and record["kinetic_energy"] > 0, record
+        elif record.get("api") == "Context.step":
             if "expected_kinetic_energy" in record:
                 expected = record["expected_kinetic_energy"]
                 tolerance = max(1e-9, 1e-10*abs(expected), 6*record["kinetic_energy_stddev"])
@@ -47,6 +49,8 @@ def main():
         expected = records[0]["energy"]
         for record in records:
             assert math.isclose(record["energy"], expected, rel_tol=1e-8, abs_tol=1e-6), records
+            if record.get("integrator", "").startswith("nose_"):
+                assert math.isclose(record["kinetic_energy"], records[0]["kinetic_energy"], rel_tol=1e-8, abs_tol=1e-7), records
     summaries = {}
     for particles, records in groups.items():
         implementations = {}
@@ -66,6 +70,8 @@ def main():
         note = "Single-process f64 integration with AndersenThermostat at 300 K, 37/ps, dt=0.001 ps, no potential forces and 10 warmup steps. Kinetic energy is checked against a six-standard-deviation equilibrium bound; random paths differ. Optimized CPU/GPU platforms are not measured."
     if all("integrator" in record for rows in groups.values() for record in rows):
         note = "Matched single-process f64 free-particle integration at dt=0.001 ps with 10 warmup steps. Stochastic friction is 0.7/ps. Kinetic energy is checked against the finite-time Gaussian mean and a six-standard-deviation bound. Random paths differ. Optimized CPU/GPU platforms are not measured."
+    if all(record.get("integrator", "").startswith("nose_") for rows in groups.values() for record in rows):
+        note = "Matched deterministic free-particle Nose-Hoover integration at 300 K, absolute collision frequency 0.7/ps, dt=0.001 ps, chain length 3, 3 MTS and 7 Yoshida-Suzuki stages, with 10 warmup steps. Pair cases use two individual atoms plus disjoint pairs with relative temperature 30 K and frequency 2/ps. Alternating atoms start at velocities (0.1,0.2,0.3) and (0.2,0.4,0.6) nm/ps, so both absolute and relative baths are exercised. Final full-particle KE is checked between implementations. This timing run is not an equilibrium or force-field test. Optimized CPU/GPU platforms are not measured."
     if all(record.get("compound_switch_each_step") for rows in groups.values() for record in rows):
         note += " CompoundIntegrator alternates between two children every step; selection overhead is included."
     if all(record.get("adaptive") for rows in groups.values() for record in rows):

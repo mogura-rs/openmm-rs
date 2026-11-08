@@ -51,7 +51,7 @@ revision in generated validation results.
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
-| Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian and nested CompoundIntegrator have reference comparisons; other integrators and wider statistical validation remain |
+| Integrators | Partial | Fixed and variable Verlet/Langevin, LFMiddle, Brownian, nested CompoundIntegrator and Nose-Hoover chains have reference comparisons; other integrators and wider statistical validation remain |
 | State updates | Partial | CMMotionRemover applies scheduled mass-weighted velocity corrections; AndersenThermostat uses constraint-group collisions and runtime temperature/frequency parameters; all four Monte Carlo barostats have CPU implementations and reference fixtures; broader molecular NPT stability and GPU execution remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | CPU wrappers retain force definitions in System and nested CV objects, snapshot current definitions at Context creation and reject duplicate ownership; integrator settings are shared with the bound Context; broader names/signatures, units and platform selection remain incomplete |
@@ -825,6 +825,124 @@ after the first successful Context binding, including after Context collection.
 This does not reproduce the source's invalid-lifetime behavior. Empty compounds
 raise Python errors when queried or bound instead of dereferencing a missing child.
 
+## Nose-Hoover chains
+
+`NoseHooverIntegrator` implements the Reference middle splitting: full force
+kick, velocity constraint projection, half drift, chain propagation, half drift,
+position constraint projection with velocity correction, and optional pair hard
+walls. Virtual sites are updated afterward. The constructor taking only a step
+size starts with no thermostats; a full-system thermostat or disjoint subsystem
+thermostats can be added before Context creation. Rust provides `new(step_size)`
+and `thermostated(temperature, frequency, step_size, length, mts, ys)`;
+Python accepts the corresponding OpenMM constructor forms.
+
+Individual particles share the absolute bath with the center-of-mass motion of
+registered pairs. Pair relative motion has a separate temperature and collision
+frequency. Chain lengths are configurable, MTS counts are positive, and
+Yoshida-Suzuki decompositions with 1, 3, 5 or 7 stages use the supplied weights.
+Constraints reduce the absolute degrees of freedom; a CMMotionRemover subtracts
+three more from the largest thermostat, resolving ties by insertion order.
+Cross-thermostat constraints, overlapping entries, invalid indices and massless
+individual thermostat atoms are rejected. A pair can have a massless second
+particle, as in the Reference hard-wall branch.
+
+Temperature, frequency, step size, constraint tolerance, force groups and maximum
+pair distance are live settings. Python `getThermostat()` returns a retained view
+of its chain, with live scalar setters and degrees-of-freedom updates. Particle
+membership is frozen after initialization so the integration lists and masks
+cannot disagree. Hard-wall temperature remains the relative temperature captured
+when the Context was created, matching the supplied implementation even after a
+live relative-temperature change. Individual integration lists include every
+non-pair atom, including unthermostated and massless particles. Thermal velocity
+initialization and kinetic energy use stored velocities without a force shift.
+
+Heat-bath energy includes the chain kinetic and potential terms. Before a chain
+has propagated it contributes zero, avoiding an uninitialized-vector access in
+the Reference kernel and matching the Common backend's safe behavior. Chain
+state persists across step-size and thermostat-parameter changes, and resets
+when the integrator is initialized for a new Context. Nested compound binding
+configures each child from the System. Checkpoint and XML serialization are still
+outstanding, as are the Drude plugin, molecular-system validation and resident
+GPU execution. Non-finite or nonpositive temperatures/frequencies, zero MTS
+counts, and nonpositive active degrees of freedom are rejected before execution;
+these produce singular masses or undefined updates in the supplied code.
+
+The reference fixture compares 3,584 states spanning two chain lengths, two MTS
+counts, all four Yoshida-Suzuki decompositions, full/subsystem/pair-only baths,
+constraints, virtual sites, force masks, zero-temperature velocity initialization,
+live chain settings, and hard-wall reflections. Four additional states check
+massive/massless pair parents and the captured hard-wall temperature. Rust tests
+also check f32 execution, degree counting, scalar one-bead propagation, constrained
+NVE behavior, zero-velocity initialization and ownership validation.
+
+Six oscillator cases use 24 massive particles at 70, 300 and 600 K, each with
+collision frequencies 1 and 10/ps. Each run uses dt=0.001 ps, 20 ps warmup and
+100 ps measurement, sampled every 0.01 ps. Both implementations must agree on
+kinetic block means and remain within 10% of the equipartition mean, 30% of the
+canonical kinetic variance, and 1% of the target mean kinetic energy for maximum
+extended-energy drift. The measured maximum relative deviations were 0.84% for the kinetic mean and
+6.06% for its variance; maximum extended-energy drift was 0.130% of the target
+mean kinetic energy. Reference and Rust gave the same oscillator summaries.
+These are finite oscillator checks, not a claim of convergence or stability for
+general molecular systems.
+
+### Approved pair COM and kinetic-energy exceptions
+
+The supplied Reference and Common chain kernels gate absolute propagation on the
+number of individual atoms. With pairs only and nonzero COM kinetic energy,
+Reference leaves the absolute scale at zero and erases COM velocity at the first
+step. Rust propagates the absolute chain whenever its thermostat contains atoms
+or pairs. The fixture keeps an extra stationary, force-free Reference atom and
+subtracts its three degrees of freedom to activate the missing branch without
+changing the pair dynamics. An independent one-bead recurrence verifies the
+corrected pair velocities and energy; an unmodified-source probe records the
+original zero-COM result.
+
+The source integrator reports only each thermostat's absolute masked kinetic
+energy, omitting pair relative motion and unthermostated particles. Rust reports
+one half of the mass-weighted squared velocity over all particles. Reference
+comparisons compute this same total directly from its saved velocities and record
+the source API's omitted energy separately. These two differences are intentional
+compatibility exceptions approved for physical correctness.
+
+The Reference guard for absolute masked kinetic energy below `1e-8` currently
+skips both chains, including a populated relative bath. This boundary is recorded
+by a separate source probe and is not covered by the two exceptions above.
+
+A hard-wall violation with exactly zero radial velocity makes Reference divide
+by zero. Rust instead chooses finite inward radial velocities, conserving pair
+COM momentum for two massive particles; the massless-parent case moves only the
+massive particle. The zero-radial rule is a defensive extension to this singular
+source branch and has an independent invariant test.
+
+### Nose-Hoover performance
+
+`scripts/benchmark-stochastic.sh nose` measures free-particle Context stepping in
+f64 at 300 K, frequency 0.7/ps and dt=0.001 ps, using length 3, 3 MTS and 7
+Yoshida-Suzuki stages. Pair cases contain two individual atoms plus disjoint
+pairs, with relative temperature 30 K and frequency 2/ps. Alternating atoms start
+with velocities (0.1,0.2,0.3) and (0.2,0.4,0.6) nm/ps, exercising both baths.
+After 10 warmup steps, the three sizes run 30,000, 1,500 and 200 measured steps.
+Three process repetitions alternate implementation order. The table shows median
+throughput and maximum process RSS in KiB. Final full-particle kinetic energies,
+clock and step count are checked across implementations.
+
+| Bath layout | Particles | Rust steps/s | Reference steps/s | Rust RSS | Reference RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Individual atoms | 8 | 390,090 | 409,712 | 4,032 | 7,184 |
+| Individual atoms | 4,096 | 17,528 | 8,604 | 5,132 | 7,888 |
+| Individual atoms | 65,536 | 1,162 | 543 | 18,492 | 22,492 |
+| Atoms and pairs | 8 | 229,087 | 222,013 | 4,028 | 7,052 |
+| Atoms and pairs | 4,096 | 12,110 | 6,701 | 5,052 | 8,120 |
+| Atoms and pairs | 65,536 | 802 | 420 | 18,376 | 25,444 |
+
+The warmed f64 CPU integration path reuses dense particle buffers and small
+chain-mass/force arrays; an allocation regression checks that unconstrained steps
+do not allocate particle-sized temporaries. Rust uses less process memory in
+these cases and is faster at the larger sizes. Reference remains slightly faster
+for eight individual atoms. These timings exclude potential-force costs and do
+not establish equilibrium sampling or optimized OpenMM CPU/GPU performance.
+
 ## Documentation discrepancies found during implementation
 
 - All four Monte Carlo barostat constructor comments call the rigid scaling center a
@@ -895,6 +1013,18 @@ raise Python errors when queried or bound instead of dereferencing a missing chi
   Both refer to `CompoundIntegrator`. The header's requirement to add children
   before Context creation is not enforced by the supplied initialization code;
   the Rust ownership boundary above enforces it explicitly.
+
+- `NoseHooverIntegrator.h` describes a collision-frequency setter argument as
+  picoseconds although the getter, constructor and propagation use inverse ps.
+- `NoseHooverChain.h` says changes to temperatures, collision frequencies and
+  degrees of freedom only affect new Contexts. The integrator setters modify the
+  same chains that its kernels read every step; these scalar changes are live.
+- Nose-Hoover constructor diagnostics require a positive MTS count but the source
+  check only rejects negative values, allowing zero. Rust enforces positivity.
+- The Nose-Hoover pair documentation promises independent COM and relative
+  thermostatting, but the source absolute-chain branch requires an individual
+  atom. Its kinetic-energy API also omits relative and unthermostated motion.
+  The approved exceptions above correct these two implementation defects.
 
 Implementation and reference tests take precedence over outdated descriptions.
 

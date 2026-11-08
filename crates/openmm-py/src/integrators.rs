@@ -92,6 +92,12 @@ impl<T: Integrator<B>> Integrator<B> for SharedIntegrator<T> {
         self.0.lock().unwrap().set_constraint_tolerance(value);
     }
 
+    fn validate_system(&self, system: &openmm_core::System<B>) -> Result<(), ConstraintError> {
+        self.0.lock().unwrap().validate_system(system)
+    }
+    fn initialize_system(&mut self, system: &openmm_core::System<B>) {
+        self.0.lock().unwrap().initialize_system(system);
+    }
     fn initialize(&mut self) {
         self.0.lock().unwrap().initialize();
     }
@@ -175,8 +181,8 @@ macro_rules! integrator_class {
     ($wrapper:ident, $name:literal, $core:ty, {$($methods:tt)*}) => {
         #[pyclass(unsendable, subclass, name = $name)]
         pub(crate) struct $wrapper {
-            inner: Arc<Mutex<$core>>,
-            link: ContextLink,
+            pub(super) inner: Arc<Mutex<$core>>,
+            pub(super) link: ContextLink,
         }
         impl $wrapper {
             fn from_core(inner: $core) -> Self {
@@ -220,6 +226,9 @@ macro_rules! integrator_class {
         }
     };
 }
+
+mod nose_hoover;
+use nose_hoover::{PyNoseHooverChain, PyNoseHooverIntegrator};
 
 integrator_class!(PyVerletIntegrator, "VerletIntegrator", VerletIntegrator, {
     #[new]
@@ -595,6 +604,7 @@ fn prepare_shared(object: &Bound<'_, PyAny>) -> PyResult<(Box<dyn Integrator<B>>
             }
         };
     }
+    extract!(PyNoseHooverIntegrator);
     extract!(PyCompoundIntegrator);
     extract!(PyVariableVerletIntegrator);
     extract!(PyVariableLangevinIntegrator);
@@ -622,6 +632,8 @@ pub(crate) fn create_context(
     {
         return Err(err("a barostat cannot be used with a non-periodic system"));
     }
+    core.validate_system(&snapshot)
+        .map_err(|e| err(&e.to_string()))?;
     let force_objects = system
         .borrow(py)
         .force_objects
@@ -645,6 +657,8 @@ pub(crate) fn create_context(
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PyNoseHooverIntegrator>()?;
+    module.add_class::<PyNoseHooverChain>()?;
     module.add_class::<PyCompoundIntegrator>()?;
     module.add_class::<PyVariableVerletIntegrator>()?;
     module.add_class::<PyVariableLangevinIntegrator>()?;
@@ -653,6 +667,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLangevinIntegrator>()?;
     module.add_class::<PyBrownianIntegrator>()?;
     for class in [
+        module.py().get_type::<PyNoseHooverIntegrator>(),
+        module.py().get_type::<PyNoseHooverChain>(),
         module.py().get_type::<PyCompoundIntegrator>(),
         module.py().get_type::<PyVariableVerletIntegrator>(),
         module.py().get_type::<PyVariableLangevinIntegrator>(),
@@ -661,6 +677,49 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.py().get_type::<PyBrownianIntegrator>(),
     ] {
         for (snake, camel) in [
+            ("add_thermostat", "addThermostat"),
+            ("add_subsystem_thermostat", "addSubsystemThermostat"),
+            ("get_num_thermostats", "getNumThermostats"),
+            ("get_thermostat", "getThermostat"),
+            ("has_subsystem_thermostats", "hasSubsystemThermostats"),
+            ("get_maximum_pair_distance", "getMaximumPairDistance"),
+            ("set_maximum_pair_distance", "setMaximumPairDistance"),
+            ("compute_heat_bath_energy", "computeHeatBathEnergy"),
+            ("get_relative_temperature", "getRelativeTemperature"),
+            ("set_relative_temperature", "setRelativeTemperature"),
+            ("get_collision_frequency", "getCollisionFrequency"),
+            ("set_collision_frequency", "setCollisionFrequency"),
+            (
+                "get_relative_collision_frequency",
+                "getRelativeCollisionFrequency",
+            ),
+            (
+                "set_relative_collision_frequency",
+                "setRelativeCollisionFrequency",
+            ),
+            ("get_num_degrees_of_freedom", "getNumDegreesOfFreedom"),
+            ("set_num_degrees_of_freedom", "setNumDegreesOfFreedom"),
+            ("get_chain_length", "getChainLength"),
+            ("get_num_multi_time_steps", "getNumMultiTimeSteps"),
+            (
+                "get_num_yoshida_suzuki_time_steps",
+                "getNumYoshidaSuzukiTimeSteps",
+            ),
+            ("get_chain_id", "getChainID"),
+            ("get_thermostated_atoms", "getThermostatedAtoms"),
+            ("set_thermostated_atoms", "setThermostatedAtoms"),
+            ("get_thermostated_pairs", "getThermostatedPairs"),
+            ("set_thermostated_pairs", "setThermostatedPairs"),
+            ("get_yoshida_suzuki_weights", "getYoshidaSuzukiWeights"),
+            (
+                "uses_periodic_boundary_conditions",
+                "usesPeriodicBoundaryConditions",
+            ),
+            (
+                "get_all_thermostated_individual_particles",
+                "getAllThermostatedIndividualParticles",
+            ),
+            ("get_all_thermostated_pairs", "getAllThermostatedPairs"),
             ("add_integrator", "addIntegrator"),
             ("get_num_integrators", "getNumIntegrators"),
             ("get_integrator", "getIntegrator"),

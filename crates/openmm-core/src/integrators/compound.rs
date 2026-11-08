@@ -53,6 +53,25 @@ impl<B: Backend> CompoundIntegrator<B> {
 }
 
 impl<B: Backend> Integrator<B> for CompoundIntegrator<B> {
+    fn validate_system(&self, system: &crate::System<B>) -> Result<(), ConstraintError> {
+        if self.children.is_empty() {
+            return Err(ConstraintError(
+                "CompoundIntegrator requires at least one child".into(),
+            ));
+        }
+        for child in &self.children {
+            child.lock().unwrap().validate_system(system)?;
+        }
+        Ok(())
+    }
+    fn initialize_system(&mut self, system: &crate::System<B>) {
+        self.validate_system(system)
+            .expect("invalid compound configuration");
+        for child in &self.children {
+            child.lock().unwrap().initialize_system(system);
+        }
+        self.initialized = true;
+    }
     fn initialize(&mut self) {
         assert!(
             !self.children.is_empty(),

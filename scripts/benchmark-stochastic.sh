@@ -18,10 +18,12 @@ case "${1:-fixed}" in
     fixed) kinds=(verlet langevin brownian) ;;
     variable) kinds=(variable_verlet variable_langevin) ;;
     compound) kinds=(compound_verlet compound_langevin) ;;
-    *) echo "Expected fixed, variable or compound" >&2; exit 2 ;;
+    nose) kinds=(nose_hoover nose_pairs) ;;
+    *) echo "Expected fixed, variable, compound or nose" >&2; exit 2 ;;
 esac
 for kind in "${kinds[@]}"; do
     temperatures=(0 300)
+    if [[ "$kind" == nose_* ]]; then temperatures=(300); fi
     if [[ "$kind" == verlet || "$kind" == variable_verlet || "$kind" == compound_verlet ]]; then temperatures=(0); fi
     for temperature in "${temperatures[@]}"; do
         directory="benchmark-results/stochastic/$kind/$temperature"

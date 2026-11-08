@@ -91,7 +91,10 @@ impl<B: Backend> Context<B> {
         let virtual_sites = VirtualSitePlan::new(system.virtual_sites(), &masses);
         let constraints = ConstraintSolver::new(system.constraints(), &masses)
             .unwrap_or_else(|error| panic!("{error}"));
-        integrator.initialize();
+        integrator
+            .validate_system(&system)
+            .expect("invalid integrator configuration");
+        integrator.initialize_system(&system);
         let host_masses = masses;
         let masses = crate::tensor::from_floats::<B, 1>(host_masses.as_slice(), &device);
         let mut parameters = HashMap::new();

@@ -1,6 +1,7 @@
 pub mod brownian;
 pub mod compound;
 pub mod langevin;
+pub mod nose_hoover;
 mod random;
 pub mod variable;
 pub mod verlet;
@@ -32,6 +33,14 @@ pub type IntegratorComponent<B> = std::sync::Arc<std::sync::Mutex<Box<dyn Integr
 pub trait Integrator<B: Backend>: Send + Sync {
     /// Initialize internal state when attaching to a Context.
     fn initialize(&mut self) {}
+
+    fn validate_system(&self, _system: &crate::System<B>) -> Result<(), ConstraintError> {
+        Ok(())
+    }
+
+    fn initialize_system(&mut self, _system: &crate::System<B>) {
+        self.initialize();
+    }
 
     fn integration_force_groups(&self) -> u32 {
         u32::MAX

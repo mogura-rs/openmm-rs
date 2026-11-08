@@ -2,8 +2,8 @@ use burn::backend::NdArray;
 use burn::tensor::TensorData;
 use openmm_core::{
     integrators::langevin::BOLTZMANN, tensor::from_floats, BrownianIntegrator, CompoundIntegrator,
-    Context, Integrator, LangevinMiddleIntegrator, StateFlags, System, VariableLangevinIntegrator,
-    VariableVerletIntegrator, VerletIntegrator,
+    Context, Integrator, LangevinMiddleIntegrator, NoseHooverIntegrator, StateFlags, System,
+    VariableLangevinIntegrator, VariableVerletIntegrator, VerletIntegrator,
 };
 use std::{hint::black_box, time::Instant};
 
@@ -34,6 +34,27 @@ fn main() {
             }
             Box::new(compound)
         }
+        "nose_hoover" | "nose_pairs" => {
+            let mut value = NoseHooverIntegrator::new(0.001);
+            if kind == "nose_hoover" {
+                value.add_thermostat(temperature, 0.7, 3, 3, 7).unwrap();
+            } else {
+                value
+                    .add_subsystem_thermostat(
+                        vec![n - 2, n - 1],
+                        (0..n - 2).step_by(2).map(|a| (a, a + 1)).collect(),
+                        temperature,
+                        0.7,
+                        30.,
+                        2.,
+                        3,
+                        3,
+                        7,
+                    )
+                    .unwrap();
+            }
+            Box::new(value)
+        }
         "verlet" => Box::new(VerletIntegrator::new(0.001)),
         "variable_verlet" => {
             let mut value = VariableVerletIntegrator::new(1e-5);
@@ -62,7 +83,14 @@ fn main() {
     context.set_velocities(from_floats(
         TensorData::new(
             (0..3 * n)
-                .map(|i| [0.1, 0.2, 0.3][i % 3])
+                .map(|i| {
+                    [0.1, 0.2, 0.3][i % 3]
+                        * if kind.starts_with("nose_") {
+                            1.0 + (i / 3 % 2) as f64
+                        } else {
+                            1.0
+                        }
+                })
                 .collect::<Vec<_>>(),
             [n, 3],
         ),
@@ -102,10 +130,15 @@ fn main() {
     };
     let expected = 0.5 * (3.0 * n as f64 * variance + mean_squared);
     let stddev = (1.5 * n as f64 * variance * variance + variance * mean_squared).sqrt();
+    let expected_json = if kind.starts_with("nose_") {
+        "null".to_string()
+    } else {
+        expected.to_string()
+    };
     let final_state = context.get_state(StateFlags::none());
     let simulation_time = final_state.time;
     let step_count = final_state.step_count;
     let adaptive = kind.starts_with("variable_");
     let error_tolerance = if adaptive { "0.00001" } else { "null" };
-    println!("{{\"implementation\":\"rust\",\"precision\":\"f64\",\"api\":\"Context.step\",\"integrator\":\"{kind}\",\"temperature\":{temperature},\"particles\":{n},\"iterations\":{iterations},\"seconds\":{seconds},\"evaluations_per_second\":{},\"energy\":0,\"kinetic_energy\":{energy},\"expected_kinetic_energy\":{expected},\"kinetic_energy_stddev\":{stddev},\"simulation_time\":{simulation_time},\"step_count\":{step_count},\"adaptive\":{adaptive},\"maximum_step_size\":0.001,\"error_tolerance\":{error_tolerance},\"compound_switch_each_step\":{compound},\"clock_repair\":false}}",iterations as f64/seconds);
+    println!("{{\"implementation\":\"rust\",\"precision\":\"f64\",\"api\":\"Context.step\",\"integrator\":\"{kind}\",\"temperature\":{temperature},\"particles\":{n},\"iterations\":{iterations},\"seconds\":{seconds},\"evaluations_per_second\":{},\"energy\":0,\"kinetic_energy\":{energy},\"expected_kinetic_energy\":{expected_json},\"kinetic_energy_stddev\":{stddev},\"simulation_time\":{simulation_time},\"step_count\":{step_count},\"adaptive\":{adaptive},\"maximum_step_size\":0.001,\"error_tolerance\":{error_tolerance},\"compound_switch_each_step\":{compound},\"clock_repair\":false}}",iterations as f64/seconds);
 }
