@@ -1,3 +1,5 @@
+mod cm_motion;
+use cm_motion::PyCMMotionRemover;
 mod custom_cv;
 use custom_cv::PyCustomCVForce;
 mod collective;
@@ -1967,6 +1969,9 @@ impl PySystem {
 }
 
 fn extract_force_snapshot(force: &Bound<'_, PyAny>) -> PyResult<Box<dyn openmm_core::Force<B>>> {
+    if let Ok(force) = force.extract::<PyRef<'_, PyCMMotionRemover>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
     if let Ok(cv) = force.extract::<PyRef<'_, PyCustomCVForce>>() {
         return Ok(Box::new(cv.snapshot(force.py())?));
     }
@@ -2342,6 +2347,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyOrientationRestraintForce>()?;
     m.add_class::<PyCustomVolumeForce>()?;
     m.add_class::<PyCustomCVForce>()?;
+    m.add_class::<PyCMMotionRemover>()?;
     m.add_class::<PyCustomAngleForce>()?;
     m.add_class::<PyCustomNonbondedForce>()?;
     m.add_class::<PyCMAPTorsionForce>()?;

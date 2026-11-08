@@ -52,6 +52,7 @@ revision in generated validation results.
 | Custom forces | Partial | Ten force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
+| State updates | Partial | CMMotionRemover applies mass-weighted velocity corrections on its configured schedule; thermostat and barostat implementations remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | Thin CPU wrappers exist, but the interface is not yet OpenMM-compatible |
 | Precision | Partial | CPU core supports f32 and f64; Python uses f64. GPU precision modes remain unverified |
@@ -64,7 +65,7 @@ integrator configurations at four time points, forty-one nonbonded configuration
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
 wrapping configurations, six minimization configurations and 184 custom-expression
-states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states, 864 geometric-expression states, 864 centroid states, 1,296 hydrogen bond states, 336 collective-geometry/volume states and 360 composite-CV states in two force-cache modes.
+states with forces and parameter derivatives, plus 1,134 tabulated-function states, 480 CMAP states, 384 custom-nonbonded states, 864 geometric-expression states, 864 centroid states, 1,296 hydrogen bond states, 336 collective-geometry/volume states, 360 composite-CV states in two force-cache modes and 576 center-of-mass-removal states.
 Geometric fixtures cover external periodic distances, compound distance/angle/dihedral
 functions, explicit point functions, shared particles, triclinic boxes, nested
 functions, table and bond updates, global parameters, groups and short trajectories.
@@ -81,6 +82,12 @@ check energy gradients and known rigid-rotation energies.
 Composite-CV fixtures combine bonds, RG, RMSD, orientation, PME, volume and nested
 CV forces. They compare inherited and outer parameters, registered derivatives,
 table updates, explicit child-force updates, periodic boxes and short trajectories.
+Center-of-mass-removal fixtures cover Verlet, LFMiddle and Brownian integration,
+constraints, massless particles, three update frequencies, four starting step
+counts and changed definition objects after Context creation. Velocity updates
+run before force evaluation, in System order, independently of force-group masks.
+State queries do not trigger them. CMMotionRemover adjusts only massive particles
+and keeps the frequency captured when the Context was created, matching Reference.
 Custom nonbonded fixtures cover all three methods, switching, overlapping and
 empty interaction groups, computed values, table updates, global changes, box
 changes and long-range corrections. Pair forces and energies use strict double
@@ -251,8 +258,8 @@ At 13,824 particles, the three-repetition measurements were:
 
 RSS is the maximum across the three processes. These results use the scripted
 coordinate workload and the Reference platform; they do not establish GPU or
-optimized OpenMM CPU performance. The optimized code passed all 16 reference
-fixtures with 468,431 scalar comparisons, 107 Rust tests and a build with the
+optimized OpenMM CPU performance. The current code passed all 17 reference
+fixtures with 496,079 scalar comparisons, 111 Rust tests and a build with the
 default backend feature disabled.
 
 `scripts/benchmark-cv.sh` measures a weighted mean of disjoint RG selections,

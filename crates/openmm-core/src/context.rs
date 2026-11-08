@@ -620,6 +620,14 @@ impl<B: Backend> Context<B> {
 
     pub fn try_step(&mut self, steps: usize) -> Result<(), ConstraintError> {
         for _ in 0..steps {
+            for force in self.system.forces_mut() {
+                force.update_context_velocities(
+                    &mut self.velocities,
+                    &self.host_masses,
+                    self.integrator.step_size(),
+                    self.step_count,
+                );
+            }
             let (forces, _) =
                 self.calc_forces_and_energy_groups(self.integrator.integration_force_groups());
             self.integrator.step_constrained(
