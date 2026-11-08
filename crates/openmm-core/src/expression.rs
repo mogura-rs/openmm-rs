@@ -1,5 +1,6 @@
 //! Compiled scalar expressions with reusable reverse-mode differentiation.
 
+use crate::tabulated::TabulatedFunction;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -7,6 +8,9 @@ use std::fmt;
 pub struct Expression {
     instructions: Vec<Instruction>,
     pub variables: Vec<String>,
+    function_names: Vec<String>,
+    function_bindings: Vec<Option<usize>>,
+    tables: Vec<(String, TabulatedFunction)>,
 }
 
 #[derive(Debug, Clone)]
@@ -16,6 +20,7 @@ pub struct Workspace {
     adjoints: Vec<f64>,
     gradients: Vec<f64>,
     differentiable: Vec<bool>,
+    function_derivatives: Vec<[f64; 3]>,
 }
 
 impl Workspace {
@@ -32,6 +37,14 @@ impl Workspace {
 
 impl Expression {
     pub fn parse(src: &str) -> Result<Self, ParseError> {
+        Self::parse_impl(src, false)
+    }
+
+    pub fn parse_unbound(src: &str) -> Result<Self, ParseError> {
+        Self::parse_impl(src, true)
+    }
+
+    fn parse_impl(src: &str, allow_unbound: bool) -> Result<Self, ParseError> {
         let parts: Vec<_> = src.split(';').collect();
         let mut definitions = HashMap::new();
         for definition in parts[1..].iter().rev().filter(|s| !s.trim().is_empty()) {
@@ -42,19 +55,110 @@ impl Expression {
             if name.is_empty() {
                 return Err(ParseError::new("subexpression does not specify a name"));
             }
-            definitions.insert(name.to_owned(), parse_tree(value, &definitions)?);
+            definitions.insert(
+                name.to_owned(),
+                parse_tree(value, &definitions, allow_unbound)?,
+            );
         }
-        let root = optimize(parse_tree(parts[0], &definitions)?);
+        let root = optimize(parse_tree(parts[0], &definitions, allow_unbound)?);
         let mut variables = Vec::new();
         collect_vars(&root, &mut variables);
         variables.sort();
         variables.dedup();
         let mut instructions = Vec::new();
-        compile(&root, &variables, &mut instructions, &mut HashMap::new());
+        let mut function_names = Vec::new();
+        compile(
+            &root,
+            &variables,
+            &mut function_names,
+            &mut instructions,
+            &mut HashMap::new(),
+        );
         Ok(Self {
             instructions,
             variables,
+            function_bindings: vec![None; function_names.len()],
+            function_names,
+            tables: Vec::new(),
         })
+    }
+
+    pub fn add_tabulated_function(
+        &mut self,
+        name: &str,
+        function: impl Into<TabulatedFunction>,
+    ) -> Result<usize, EvalError> {
+        let function = function.into();
+        if self.tables.iter().any(|(existing, _)| existing == name) {
+            return Err(EvalError(format!("duplicate tabulated function: {name}")));
+        }
+        if Op::function(name).is_ok() {
+            return Err(EvalError(format!("reserved function name: {name}")));
+        }
+        if let Some(binding) = self
+            .function_names
+            .iter()
+            .position(|existing| existing == name)
+        {
+            for instruction in &self.instructions {
+                if let Instruction::Function(index, arity, _) = instruction {
+                    if *index == binding && *arity != function.arity() {
+                        return Err(EvalError(format!(
+                            "{name} requires {} arguments",
+                            function.arity()
+                        )));
+                    }
+                }
+            }
+            self.function_bindings[binding] = Some(self.tables.len());
+        }
+        self.tables.push((name.to_owned(), function));
+        Ok(self.tables.len() - 1)
+    }
+
+    pub fn num_tabulated_functions(&self) -> usize {
+        self.tables.len()
+    }
+    pub fn tabulated_function_name(&self, index: usize) -> &str {
+        &self.tables[index].0
+    }
+    pub fn tabulated_function(&self, index: usize) -> &TabulatedFunction {
+        &self.tables[index].1
+    }
+    pub fn set_tabulated_function(
+        &mut self,
+        index: usize,
+        function: impl Into<TabulatedFunction>,
+    ) -> Result<(), EvalError> {
+        let function = function.into();
+        if std::mem::discriminant(&self.tables[index].1) != std::mem::discriminant(&function) {
+            return Err(EvalError("tabulated function type cannot change".into()));
+        }
+        self.tables[index].1 = function;
+        Ok(())
+    }
+    pub fn update_tabulated_functions_from(&mut self, source: &Self) {
+        assert_eq!(
+            self.tables.len(),
+            source.tables.len(),
+            "tabulated function count must match"
+        );
+        for index in 0..self.tables.len() {
+            assert_eq!(
+                self.tables[index].0, source.tables[index].0,
+                "tabulated function names must match"
+            );
+            self.set_tabulated_function(index, source.tables[index].1.clone())
+                .unwrap();
+        }
+    }
+    pub fn validate_functions(&self) -> Result<(), EvalError> {
+        for (name, binding) in self.function_names.iter().zip(&self.function_bindings) {
+            if binding.is_none() {
+                return Err(EvalError(format!("undefined function: {name}")));
+            }
+        }
+        Ok(())
     }
 
     pub fn variable_index(&self, name: &str) -> Option<usize> {
@@ -67,6 +171,7 @@ impl Expression {
         &self,
         names: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), EvalError> {
+        self.validate_functions()?;
         let names: Vec<_> = names.into_iter().collect();
         for name in &self.variables {
             if !names.contains(&name.as_str()) {
@@ -88,6 +193,9 @@ impl Expression {
         let mut differentiable = vec![false; self.instructions.len()];
         for (index, instruction) in self.instructions.iter().enumerate() {
             differentiable[index] = match instruction {
+                Instruction::Function(_, arity, args) => {
+                    args[..*arity].iter().any(|&arg| differentiable[arg])
+                }
                 Instruction::Literal(_) => false,
                 Instruction::Variable(input) => active_inputs[*input],
                 Instruction::Operation(op, args) => match op {
@@ -112,10 +220,19 @@ impl Expression {
             adjoints: vec![0.0; self.instructions.len()],
             gradients: vec![0.0; self.variables.len()],
             differentiable,
+            function_derivatives: vec![
+                [0.0; 3];
+                if self.function_names.is_empty() {
+                    0
+                } else {
+                    self.instructions.len()
+                }
+            ],
         }
     }
 
     pub fn compute(&self, vars: &HashMap<&str, f64>) -> Result<f64, EvalError> {
+        self.validate_functions()?;
         let mut workspace = self.workspace_with_derivatives([]);
         for (index, name) in self.variables.iter().enumerate() {
             workspace.inputs[index] = *vars
@@ -130,6 +247,15 @@ impl Expression {
         assert_eq!(workspace.values.len(), self.instructions.len());
         for (index, instruction) in self.instructions.iter().enumerate() {
             workspace.values[index] = match *instruction {
+                Instruction::Function(binding, _, args) => {
+                    let function = &self.tables
+                        [self.function_bindings[binding].expect("unbound tabulated function")]
+                    .1;
+                    let (value, gradient) =
+                        function.evaluate(args.map(|arg| workspace.values[arg]));
+                    workspace.function_derivatives[index] = gradient;
+                    value
+                }
                 Instruction::Literal(bits) => f64::from_bits(bits),
                 Instruction::Variable(input) => workspace.inputs[input],
                 Instruction::Operation(op, args) => op.value(args.map(|a| workspace.values[a])),
@@ -153,6 +279,14 @@ impl Expression {
                     for i in 0..op.arity() {
                         if active[i] && derivatives[i] != 0.0 {
                             workspace.adjoints[args[i]] += adjoint * derivatives[i];
+                        }
+                    }
+                }
+                Instruction::Function(_, arity, args) => {
+                    for (i, &arg) in args[..arity].iter().enumerate() {
+                        let derivative = workspace.function_derivatives[index][i];
+                        if workspace.differentiable[arg] && derivative != 0.0 {
+                            workspace.adjoints[arg] += adjoint * derivative;
                         }
                     }
                 }
@@ -191,6 +325,7 @@ enum Expr {
     Literal(f64),
     Variable(String),
     Operation(Op, Vec<Expr>),
+    Function(String, Vec<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -198,6 +333,7 @@ enum Instruction {
     Literal(u64),
     Variable(usize),
     Operation(Op, [usize; 3]),
+    Function(usize, usize, [usize; 3]),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -458,6 +594,9 @@ impl Op {
 }
 
 fn optimize(expr: Expr) -> Expr {
+    if let Expr::Function(name, args) = expr {
+        return Expr::Function(name, args.into_iter().map(optimize).collect());
+    }
     let Expr::Operation(op, args) = expr else {
         return expr;
     };
@@ -500,7 +639,9 @@ fn integer_power(base: &Expr, power: usize) -> Expr {
 fn collect_vars(expr: &Expr, variables: &mut Vec<String>) {
     match expr {
         Expr::Variable(name) => variables.push(name.clone()),
-        Expr::Operation(_, args) => args.iter().for_each(|arg| collect_vars(arg, variables)),
+        Expr::Operation(_, args) | Expr::Function(_, args) => {
+            args.iter().for_each(|arg| collect_vars(arg, variables))
+        }
         _ => {}
     }
 }
@@ -508,16 +649,31 @@ fn collect_vars(expr: &Expr, variables: &mut Vec<String>) {
 fn compile(
     expr: &Expr,
     variables: &[String],
+    function_names: &mut Vec<String>,
     instructions: &mut Vec<Instruction>,
     cache: &mut HashMap<Instruction, usize>,
 ) -> usize {
     let instruction = match expr {
         Expr::Literal(value) => Instruction::Literal(value.to_bits()),
         Expr::Variable(name) => Instruction::Variable(variables.binary_search(name).unwrap()),
+        Expr::Function(name, args) => {
+            let binding = match function_names.iter().position(|existing| existing == name) {
+                Some(index) => index,
+                None => {
+                    function_names.push(name.clone());
+                    function_names.len() - 1
+                }
+            };
+            let mut indexes = [0; 3];
+            for (index, arg) in args.iter().enumerate() {
+                indexes[index] = compile(arg, variables, function_names, instructions, cache);
+            }
+            Instruction::Function(binding, args.len(), indexes)
+        }
         Expr::Operation(op, args) => {
             let mut indexes = [0; 3];
             for (index, arg) in args.iter().enumerate() {
-                indexes[index] = compile(arg, variables, instructions, cache);
+                indexes[index] = compile(arg, variables, function_names, instructions, cache);
             }
             Instruction::Operation(*op, indexes)
         }
@@ -593,11 +749,16 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
     Ok(tokens)
 }
 
-fn parse_tree(src: &str, definitions: &HashMap<String, Expr>) -> Result<Expr, ParseError> {
+fn parse_tree(
+    src: &str,
+    definitions: &HashMap<String, Expr>,
+    allow_unbound: bool,
+) -> Result<Expr, ParseError> {
     let mut parser = Parser {
         tokens: tokenize(src)?,
         position: 0,
         definitions,
+        allow_unbound,
     };
     let result = parser.expression(0)?;
     if parser.position != parser.tokens.len() {
@@ -610,6 +771,7 @@ struct Parser<'a> {
     tokens: Vec<Token>,
     position: usize,
     definitions: &'a HashMap<String, Expr>,
+    allow_unbound: bool,
 }
 impl Parser<'_> {
     fn expression(&mut self, precedence: u8) -> Result<Expr, ParseError> {
@@ -630,7 +792,7 @@ impl Parser<'_> {
             Token::Name(name) => {
                 if self.tokens.get(self.position) == Some(&Token::Left) {
                     self.position += 1;
-                    let op = Op::function(&name)?;
+                    let op = Op::function(&name);
                     let mut args = Vec::new();
                     if self.tokens.get(self.position) != Some(&Token::Right) {
                         loop {
@@ -642,13 +804,28 @@ impl Parser<'_> {
                         }
                     }
                     self.expect(Token::Right)?;
-                    if args.len() != op.arity() {
-                        return Err(ParseError::new(&format!(
-                            "{name} requires {} arguments",
-                            op.arity()
-                        )));
+                    match op {
+                        Ok(op) => {
+                            if args.len() != op.arity() {
+                                return Err(ParseError::new(&format!(
+                                    "{name} requires {} arguments",
+                                    op.arity()
+                                )));
+                            }
+                            Expr::Operation(op, args)
+                        }
+                        Err(error) => {
+                            if !self.allow_unbound {
+                                return Err(error);
+                            }
+                            if !(1..=3).contains(&args.len()) {
+                                return Err(ParseError::new(
+                                    "tabulated functions require 1-3 arguments",
+                                ));
+                            }
+                            Expr::Function(name, args)
+                        }
                     }
-                    Expr::Operation(op, args)
                 } else {
                     self.definitions
                         .get(&name)
@@ -714,6 +891,29 @@ mod tests {
                 .map(|(name, _)| workspace.derivative(expression.variable_index(name)))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn bound_tables_propagate_chain_rule_and_reject_invalid_calls() {
+        use crate::tabulated::Continuous1DFunction;
+        let table = Continuous1DFunction::new([2], vec![1.0, 5.0], [[0.0, 2.0]], false).unwrap();
+        let mut expression = Expression::parse_unbound("g*f(x^2)+f(f(x))").unwrap();
+        assert!(expression.validate_variables(["g", "x"]).is_err());
+        expression
+            .add_tabulated_function("f", table.clone())
+            .unwrap();
+        assert!(expression
+            .add_tabulated_function("f", table.clone())
+            .is_err());
+        expression.validate_variables(["g", "x"]).unwrap();
+        let mut workspace = expression.workspace();
+        workspace.set(expression.variable_index("x"), 0.3);
+        workspace.set(expression.variable_index("g"), 1.7);
+        assert!((expression.evaluate(&mut workspace) - 6.206).abs() < 1e-14);
+        assert!((workspace.derivative(expression.variable_index("x")) - 6.04).abs() < 1e-14);
+        assert!((workspace.derivative(expression.variable_index("g")) - 1.18).abs() < 1e-14);
+        let mut invalid = Expression::parse_unbound("f(x,y)").unwrap();
+        assert!(invalid.add_tabulated_function("f", table).is_err());
     }
 
     #[test]

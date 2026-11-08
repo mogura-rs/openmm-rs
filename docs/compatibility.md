@@ -49,7 +49,7 @@ revision in generated validation results.
 | Bonded forces | Partial | Reference coverage, CMAP, GPU execution |
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
-| Custom forces | Partial | Five force types use compiled scalar expressions, shared subexpressions and analytic coordinate/parameter derivatives; tabulated/geometric functions, other force types and broader API coverage remain |
+| Custom forces | Partial | Five force types use compiled scalar expressions, shared subexpressions and analytic coordinate/parameter derivatives; six tabulated function types are available for CustomNonbondedForce; geometric functions, other force types and broader API coverage remain |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
 | Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | Thin CPU wrappers exist, but the interface is not yet OpenMM-compatible |
@@ -63,7 +63,7 @@ integrator configurations at four time points, forty-one nonbonded configuration
 seven virtual site configurations at three time points, fifteen bonded/custom
 force configurations, 120 group/integration configurations, three molecular
 wrapping configurations, six minimization configurations and 184 custom-expression
-states with forces and parameter derivatives.
+states with forces and parameter derivatives, plus 1,134 tabulated-function states.
 Nonbonded fixtures include Ewald, electrostatic/dispersion PME, neutral and charged
 systems, exceptions, runtime offsets, parameter updates and periodic box changes.
 Mesh parameters are fixed when a Context is initialized, as in the reference.
@@ -91,7 +91,12 @@ Constant subexpressions are folded, small nonnegative integer powers use product
 and reverse-mode evaluation skips derivatives that the caller does not request.
 Derivative buffers are reused within each force evaluation; interactions
 do not allocate variable maps or use numerical differences. `log10` remains a Rust
-extension. Tabulated functions and geometry functions such as `periodicdistance`
+extension. Continuous and discrete 1D/2D/3D tables support natural/periodic
+splines, analytical chain-rule derivatives, clamped nearest-index lookup and
+runtime parameter updates. Continuous tables store nodal mixed derivatives and
+contract one axis at a time; immutable table data is shared by cloned forces.
+Python table objects retain shared ownership when registered with a force;
+Context updates copy a snapshot. Geometry functions such as `periodicdistance`
 are not yet supported. A constant NaN in an unselected branch can prevent the
 supplied Lepton optimizer from terminating because NaN is unequal to itself.
 Reference fixtures therefore use defined scalar domains; Rust separately checks
@@ -168,3 +173,14 @@ Cartesian symmetry sites and the other site types are unaffected.
 The `SymmetrySite` formulas in the reference header also repeat the x-coordinate
 label and contain index typos in the y/z rows. Position evaluation follows the
 reference implementation's matrix multiplication.
+
+## Table endpoint roundoff
+
+The supplied Reference implementation can reject a declared upper endpoint when
+constructing its final grid knot rounds downward. A six-point continuous table
+on `[-1.1, 2.2]` reproduces this: evaluation at `2.2` throws an out-of-range error.
+Rust treats the declared bounds as authoritative and evaluates the last cell.
+The reference fixture records this exception separately from the 1,134 matching
+states; it checks that Rust returns the final table value and finite forces.
+Rust also validates periodic endpoint agreement when creating a table, whereas
+the reference defers that check until spline construction in a Context.

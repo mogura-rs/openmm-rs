@@ -5,13 +5,13 @@ cd "$(dirname "$0")/.."
 reference_source="${OPENMM_SOURCE:-../openmm}"
 reference_build="target/reference-openmm"
 jobs="${SLURM_CPUS_PER_TASK:-4}"
-fixtures=(integrators nonbonded virtual_sites bonded groups molecules minimizer custom)
+fixtures=(integrators nonbonded virtual_sites bonded groups molecules minimizer custom tables)
 if [[ $# -gt 0 ]]; then
     fixtures=("$@")
 fi
 for fixture in "${fixtures[@]}"; do
     case "$fixture" in
-        integrators|nonbonded|virtual_sites|bonded|groups|molecules|minimizer|custom) ;;
+        integrators|nonbonded|virtual_sites|bonded|groups|molecules|minimizer|custom|tables) ;;
         *) echo "Unknown reference fixture: $fixture" >&2; exit 2 ;;
     esac
 done
@@ -32,6 +32,7 @@ for fixture in "${fixtures[@]}"; do
     "${CXX:-c++}" -std=c++17 -O2 "tests/reference/${fixture}.cpp" \
         -I "$reference_source/openmmapi/include" -I "$reference_source/olla/include" \
         -I "$reference_source/serialization/include" \
+        -I "$reference_source/platforms/reference/include" -I "$reference_source/libraries/lepton/include" \
         -L "$reference_build" -Wl,-rpath,"$(pwd)/$reference_build" -lOpenMM \
         -o "target/reference-${fixture}"
     "target/reference-${fixture}" > "validation-results/${fixture}-reference.jsonl"

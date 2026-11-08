@@ -31,7 +31,7 @@ impl CustomNonbondedForce {
     pub fn new(energy: &str) -> Result<Self, crate::expression::ParseError> {
         Ok(Self {
             metadata: super::ForceMetadata::new("CustomNonbondedForce"),
-            energy_expr: Expression::parse(energy)?,
+            energy_expr: Expression::parse_unbound(energy)?,
             per_particle_params: Vec::new(),
             paired_parameter_names: Vec::new(),
             particles: Vec::new(),
@@ -44,6 +44,30 @@ impl CustomNonbondedForce {
             use_neighbor_cells: true,
             neighbor_cells: NeighborCells::default(),
         })
+    }
+
+    pub fn add_tabulated_function(
+        &mut self,
+        name: &str,
+        function: impl Into<crate::TabulatedFunction>,
+    ) -> Result<usize, crate::expression::EvalError> {
+        self.energy_expr.add_tabulated_function(name, function)
+    }
+    pub fn num_tabulated_functions(&self) -> usize {
+        self.energy_expr.num_tabulated_functions()
+    }
+    pub fn tabulated_function_name(&self, index: usize) -> &str {
+        self.energy_expr.tabulated_function_name(index)
+    }
+    pub fn tabulated_function(&self, index: usize) -> &crate::TabulatedFunction {
+        self.energy_expr.tabulated_function(index)
+    }
+    pub fn set_tabulated_function(
+        &mut self,
+        index: usize,
+        function: impl Into<crate::TabulatedFunction>,
+    ) -> Result<(), crate::expression::EvalError> {
+        self.energy_expr.set_tabulated_function(index, function)
     }
 
     pub fn add_per_particle_parameter(&mut self, name: &str) -> usize {
@@ -187,6 +211,8 @@ impl CustomNonbondedForce {
             source.exclusions.len(),
             "exclusion count must match"
         );
+        self.energy_expr
+            .update_tabulated_functions_from(&source.energy_expr);
         self.particles = source.particles.clone();
         self.exclusions = source.exclusions.clone();
     }

@@ -6,6 +6,7 @@ pub mod integrators;
 pub mod minimizer;
 pub mod state;
 pub mod system;
+pub mod tabulated;
 pub mod tensor;
 pub mod units;
 pub mod virtual_sites;
@@ -18,6 +19,10 @@ pub use minimizer::{
 };
 pub use state::{State, StateFlags};
 pub use system::System;
+pub use tabulated::{
+    Continuous1DFunction, Continuous2DFunction, Continuous3DFunction, Discrete1DFunction,
+    Discrete2DFunction, Discrete3DFunction, TabulatedFunction,
+};
 pub use virtual_sites::VirtualSite;
 
 // Commonly used force re-exports.

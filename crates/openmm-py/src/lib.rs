@@ -1,5 +1,6 @@
 // Thin pyo3 wrapper. All simulation logic lives in openmm-core.
 // Backend is fixed to NdArray (CPU) at the Python boundary.
+mod tabulated;
 mod virtual_sites;
 use burn::backend::NdArray;
 use burn::prelude::{Backend, Tensor};
@@ -1022,9 +1023,19 @@ impl PyCustomAngleForce {
 #[pyclass(unsendable, name = "CustomNonbondedForce")]
 struct PyCustomNonbondedForce {
     inner: CustomNonbondedForce,
+    tables: Vec<tabulated::SharedTable>,
 }
 
 impl PyCustomNonbondedForce {
+    fn snapshot(&self) -> CustomNonbondedForce {
+        let mut force = self.inner.clone();
+        for (index, table) in self.tables.iter().enumerate() {
+            force
+                .set_tabulated_function(index, table.borrow().clone())
+                .unwrap();
+        }
+        force
+    }
     fn inner_mut(&mut self) -> &mut CustomNonbondedForce {
         &mut self.inner
     }
@@ -1052,7 +1063,39 @@ impl PyCustomNonbondedForce {
     #[new]
     fn new(energy: &str) -> PyResult<Self> {
         let inner = CustomNonbondedForce::new(energy).map_err(|e| err(&e.to_string()))?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            tables: Vec::new(),
+        })
+    }
+
+    fn add_tabulated_function(
+        &mut self,
+        name: &str,
+        function: &Bound<'_, PyAny>,
+    ) -> PyResult<usize> {
+        let table = tabulated::extract(function)?;
+        let index = self
+            .inner
+            .add_tabulated_function(name, table.borrow().clone())
+            .map_err(|error| err(&error.to_string()))?;
+        self.tables.push(table);
+        Ok(index)
+    }
+    fn get_num_tabulated_functions(&self) -> usize {
+        self.tables.len()
+    }
+    fn get_tabulated_function_name(&self, index: usize) -> PyResult<String> {
+        self.tables.get(index).ok_or_else(|| {
+            pyo3::exceptions::PyIndexError::new_err("tabulated function index out of range")
+        })?;
+        Ok(self.inner.tabulated_function_name(index).to_owned())
+    }
+    fn get_tabulated_function(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyAny>> {
+        let table = self.tables.get(index).ok_or_else(|| {
+            pyo3::exceptions::PyIndexError::new_err("tabulated function index out of range")
+        })?;
+        tabulated::wrap(py, table.clone())
     }
 
     fn add_per_particle_parameter(&mut self, name: &str) -> usize {
@@ -1770,8 +1813,7 @@ impl PySystem {
             return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomNonbondedForce>>() {
-            let inner = &force.inner;
-            return Ok(self.inner_mut().add_force(Box::new(inner.clone())));
+            return Ok(self.inner_mut().add_force(Box::new(force.snapshot())));
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomTorsionForce>>() {
             let inner = &force.inner;
@@ -1994,9 +2036,8 @@ impl PyContext {
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomNonbondedForce>>() {
-            let inner = &force.inner;
             self.inner
-                .update_custom_nonbonded_force_parameters(force_index, inner);
+                .update_custom_nonbonded_force_parameters(force_index, &force.snapshot());
             return Ok(());
         }
         if let Ok(force) = force.extract::<PyRef<'_, PyCustomTorsionForce>>() {
@@ -2088,6 +2129,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCustomBondForce>()?;
     m.add_class::<PyCustomAngleForce>()?;
     m.add_class::<PyCustomNonbondedForce>()?;
+    tabulated::register(m)?;
     m.add_class::<PyCustomTorsionForce>()?;
     m.add_class::<PyHarmonicBondForce>()?;
     m.add_class::<PyHarmonicAngleForce>()?;
