@@ -28,7 +28,10 @@ use crate::system::{validate_box_vectors, System};
 use crate::units::BoxVectors;
 use crate::virtual_sites::VirtualSitePlan;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    OnceLock,
+};
 
 pub struct Context<B: Backend> {
     system: System<B>,
@@ -39,7 +42,8 @@ pub struct Context<B: Backend> {
     parameters: HashMap<String, f64>,
     time: f64,
     step_count: u64,
-    force_revision: u64,
+    force_revision: AtomicU64,
+    dynamic_force_groups: Vec<(usize, AtomicU32)>,
     device: B::Device,
     constraints: ConstraintSolver,
     masses: Tensor<B, 1>,
@@ -52,10 +56,18 @@ pub struct Context<B: Backend> {
 
 impl<B: Backend> Context<B> {
     pub(crate) fn invalidate_force_cache(&mut self) {
-        self.force_revision = self.force_revision.wrapping_add(1);
+        self.force_revision.fetch_add(1, Ordering::Relaxed);
     }
     pub(crate) fn force_state_revision(&self) -> u64 {
-        self.force_revision
+        let mut changed = false;
+        for (index, previous) in &self.dynamic_force_groups {
+            let group = self.system.forces()[*index].force_group();
+            changed |= previous.swap(group, Ordering::Relaxed) != group;
+        }
+        if changed {
+            self.force_revision.fetch_add(1, Ordering::Relaxed);
+        }
+        self.force_revision.load(Ordering::Relaxed)
     }
 
     pub fn system(&self) -> &System<B> {
@@ -119,6 +131,13 @@ impl<B: Backend> Context<B> {
         }
         let positions = crate::tensor::from_f64_vec(vec![0.0; 3 * n], [n, 3], &device);
         let velocities = crate::tensor::from_f64_vec(vec![0.0; 3 * n], [n, 3], &device);
+        let dynamic_force_groups = system
+            .forces()
+            .iter()
+            .enumerate()
+            .filter(|(_, force)| force.has_dynamic_force_group())
+            .map(|(index, force)| (index, AtomicU32::new(force.force_group())))
+            .collect();
         Self {
             system,
             integrator,
@@ -128,7 +147,8 @@ impl<B: Backend> Context<B> {
             parameters,
             time: 0.0,
             step_count: 0,
-            force_revision: 0,
+            force_revision: AtomicU64::new(0),
+            dynamic_force_groups,
             device,
             constraints,
             masses,

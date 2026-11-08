@@ -14,6 +14,7 @@ pub struct CustomCVForce<B: Backend> {
     parameters: Option<HashMap<String, f64>>,
     derivative_names: Vec<String>,
     force_cache_bytes: usize,
+    captured_periodic: Option<bool>,
 }
 
 impl<B: Backend> CustomCVForce<B> {
@@ -29,6 +30,7 @@ impl<B: Backend> CustomCVForce<B> {
             parameters: None,
             derivative_names: Vec::new(),
             force_cache_bytes: 16 * 1024 * 1024,
+            captured_periodic: None,
         })
     }
     pub fn energy_function(&self) -> &str {
@@ -157,9 +159,11 @@ impl<B: Backend> CustomCVForce<B> {
             .update_tabulated_functions_from(&source.expression);
     }
     pub fn uses_periodic_boundary_conditions(&self) -> bool {
-        self.variables
-            .iter()
-            .any(|(_, force)| force.uses_periodic_boundary_conditions())
+        self.captured_periodic.unwrap_or_else(|| {
+            self.variables
+                .iter()
+                .any(|(_, force)| force.uses_periodic_boundary_conditions())
+        })
     }
 
     fn parameter_values(&self) -> HashMap<String, f64> {
@@ -298,6 +302,12 @@ impl<B: Backend> Force<B> for CustomCVForce<B> {
             force.initialize_masses(masses);
         }
     }
+    fn prepare_for_inner_context(&mut self) {
+        self.captured_periodic = None;
+        for (_, force) in &mut self.variables {
+            force.prepare_for_inner_context();
+        }
+    }
     fn initialize(&mut self, n: usize, vectors: Option<&[[f64; 3]; 3]>) {
         self.expression
             .validate_functions()
@@ -310,7 +320,9 @@ impl<B: Backend> Force<B> for CustomCVForce<B> {
                     .chain(self.variables.iter().map(|(name, _)| name.as_str())),
             )
             .unwrap_or_else(|e| panic!("{e}"));
+        self.captured_periodic = Some(self.uses_periodic_boundary_conditions());
         for (_, force) in &mut self.variables {
+            force.prepare_for_inner_context();
             force.initialize(n, vectors);
         }
         let values = self.parameter_values();
@@ -407,6 +419,7 @@ pub(crate) fn update_force_parameters<B: Backend>(
     update!(crate::CustomCentroidBondForce);
     update!(crate::CustomHbondForce);
     update!(crate::ConstantPotentialForce);
+    update!(crate::DrudeForce);
     update!(CustomCVForce<B>);
     Err("this force does not support parameter updates".to_owned())
 }

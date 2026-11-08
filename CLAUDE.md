@@ -158,6 +158,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - `GayBerneForce` — anisotropic ellipsoids, conservative frame derivatives, scalar spherical pairs, cutoff cells and full Reference-style updates
 - `LCPOForce` — surface overlap terms, analytic forces, reusable contact graphs and triangle traversal
 - `GBSAOBCForce` — OBC-II solvation, ACE surface energy, cutoff cells, triclinic boxes and live particle updates
+- `DrudeForce` — raw-coordinate anisotropic springs, periodic screened dipoles, captured numeric parameters and live root force groups
 - `ConstantPotentialForce` — periodic PME, Gaussian electrodes, CG and packed-matrix charge solvers, external fields and total-charge constraints
 - `NonbondedForce` — cutoff/reaction field, Ewald, PME, LJPME, parameter offsets, switching and dispersion correction
 - Virtual sites — averages, out-of-plane, local coordinates, symmetry and nested dependencies
@@ -180,6 +181,6 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 
 - Units follow OpenMM defaults: nm, kJ/mol, Da, ps, e (elementary charge)
 - Public simulation methods currently accept scalar values in OpenMM units; `uom` aliases do not yet enforce units at those boundaries
-- Periodic boundary conditions: use minimum image convention for all pairwise distances
+- Periodic distances follow each force's contract. Use minimum images where specified; Drude springs and anisotropy axes always use raw coordinates.
 - PME cutoff and Ewald parameters live in `NonbondedForce`, not in `Context`
 - Reference implementation is `openmm/platforms/reference/src/SimTKReference/`; use it as the algorithmic ground truth

@@ -1,3 +1,5 @@
+mod drude;
+use drude::PyDrudeForce;
 mod constant_potential;
 use constant_potential::PyConstantPotentialForce;
 mod custom_many;
@@ -1671,7 +1673,7 @@ impl PySystem {
     fn snapshot(&self, py: Python<'_>) -> PyResult<System<B>> {
         let mut system = self.inner.clone();
         for force in &self.force_objects {
-            system.add_force(extract_force_snapshot(force.bind(py))?);
+            system.add_force(extract_context_force_snapshot(force.bind(py))?);
         }
         Ok(system)
     }
@@ -1823,7 +1825,20 @@ impl PySystem {
     }
 }
 
+fn extract_context_force_snapshot(
+    force: &Bound<'_, PyAny>,
+) -> PyResult<Box<dyn openmm_core::Force<B>>> {
+    if let Ok(force) = force.extract::<PyRef<'_, PyDrudeForce>>() {
+        return Ok(Box::new(force.inner.snapshot_for_context()));
+    }
+    extract_force_snapshot(force)
+}
+
 fn extract_force_snapshot(force: &Bound<'_, PyAny>) -> PyResult<Box<dyn openmm_core::Force<B>>> {
+    if let Ok(force) = force.extract::<PyRef<'_, PyDrudeForce>>() {
+        return Ok(Box::new(force.inner.clone()));
+    }
+
     if let Ok(force) = force.extract::<PyRef<'_, PyConstantPotentialForce>>() {
         return Ok(Box::new(force.inner.clone()));
     }
@@ -2340,6 +2355,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCustomVolumeForce>()?;
     m.add_class::<PyCustomCVForce>()?;
     constant_potential::register(m)?;
+    drude::register(m)?;
     m.add_class::<PyCMMotionRemover>()?;
     m.add_class::<PyAndersenThermostat>()?;
     barostat::register(m)?;

@@ -1,3 +1,4 @@
+pub use forces::drude::{DrudeForce, DrudeParticle, DrudeScreenedPair};
 pub mod constraints;
 pub mod context;
 pub mod expression;

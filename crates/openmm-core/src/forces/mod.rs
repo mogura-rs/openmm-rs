@@ -18,6 +18,7 @@ pub mod custom_many;
 pub mod custom_nonbonded;
 pub mod custom_torsion;
 pub mod custom_volume;
+pub mod drude;
 mod ewald;
 pub mod flexible_barostat;
 pub mod gay_berne;
@@ -176,10 +177,16 @@ pub trait Force<B: Backend>: Send + Sync + AsAny + ForceClone<B> {
     ) {
     }
 
+    fn prepare_for_inner_context(&mut self) {}
+
     fn initialize(&mut self, _num_particles: usize, _box_vectors: Option<&[[f64; 3]; 3]>) {}
 
     fn force_group(&self) -> u32 {
         0
+    }
+
+    fn has_dynamic_force_group(&self) -> bool {
+        false
     }
 
     fn name(&self) -> &str {

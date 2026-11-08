@@ -52,6 +52,7 @@ revision in generated validation results.
 | Custom forces | Partial | Twelve force types use compiled expressions and analytic derivatives, including nested collective variables; nonbonded, compound, centroid, hydrogen bond, GB, many-particle and CV forces support six table types; periodic external distances, geometric functions and volume energies are implemented; other force types and broader API coverage remain |
 | Implicit solvation | Partial | GBSA-OBC and programmable CustomGB support polar/surface forces, three cutoff methods, particle updates, cell traversal and nested CV use; application parameter assignment and resident GPU execution remain |
 | Anisotropic particles | Partial | Gay-Berne energies, conservative orientation forces, exceptions and live updates are implemented; source-force exceptions are explicit; resident GPU execution remains |
+| Drude polarization | Partial | Anisotropic springs, screened dipoles, numeric updates, live root groups and Reference comparisons are implemented; dedicated integrators, application preparation and resident GPU execution remain |
 | Conducting electrodes | Partial | Constant-potential PME, CG and packed-matrix charge solvers, external fields, total-charge constraints, parameter updates and CPU comparisons are implemented; molecular preparation and resident GPU execution remain |
 | Surface area | Partial | LCPO overlap energies, analytic forces, periodic distances and parameter updates are implemented; application parameter assignment and resident GPU execution remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
@@ -65,7 +66,8 @@ revision in generated validation results.
 
 `scripts/validate-reference.sh` builds the external OpenMM Reference library and
 runs C++ fixtures against the Rust Python extension. Both libraries use release
-builds by default; set `OPENMM_RS_PROFILE=debug` for a debug Rust extension. The
+builds by default; set `OPENMM_RS_PROFILE=debug` for a debug Rust extension.
+`OPENMM_REFERENCE_BUILD` and `CARGO_TARGET_DIR` can select reusable build directories. The
 selected Rust profile is recorded with the generated results. Current fixtures cover seven
 integrator configurations at four time points, forty-one nonbonded configurations,
 seven virtual site configurations at three time points, fifteen bonded/custom
@@ -2058,6 +2060,130 @@ process peak RSS. The matrix result benefits from fixed electrode geometry; its
 first query includes matrix construction and factorization. These timings do not
 cover moving electrodes or large dense electrode clusters.
 
+## Drude polarization forces
+
+`DrudeForce` implements harmonic Drude-parent springs with two optional anisotropy
+axes, plus Thole-screened interactions between selected dipoles. A screened pair
+refers to two entries in the force's Drude-particle list. Its four charge terms
+use the Drude charge and its opposite on each parent. The ordinary nonbonded force
+must separately supply the rest of the electrostatics and Lennard-Jones terms.
+This section covers the force; the dedicated Drude integrators and application
+parameter assignment remain separate work.
+
+The implementation follows the supplied Reference formulas, including forces on
+all particles that define an anisotropy axis. Springs and axes always use raw
+coordinates. The periodic flag applies only to screened interactions, using the
+current reduced triclinic box. The two axes need not be orthogonal. An omitted
+axis disables its anisotropy parameter; either missing endpoint disables the
+second axis. Input checks match the source's positive polarizability and active
+anisotropy checks. The source does not require `3-aniso12-aniso34` to be positive,
+and Rust retains that input boundary. Finite negative values are tested as API
+and gradient cases, not used in the stability runs.
+
+Spring constants and screened-pair coefficients are calculated at initialization
+and parameter updates. Only those coefficients are cached; particle definitions
+are not duplicated in the cache. The force visits the supplied springs and
+screened pairs directly, using O(K+S) parameter storage for K Drude particles and
+S screened pairs. There is no all-pairs search or dense interaction matrix. The
+host accumulation path reuses one force buffer. An 8,192-particle allocation test
+checks that warm host evaluations make no new dense allocation, while the tensor
+API allocates one returned force buffer. Core f64 and f32 output are tested.
+
+### Drude definition and update boundaries
+
+Each Drude and parent index belongs to only one oscillator. Orientation particles
+may be shared, and optional axes use `-1` in Python. Duplicate screened pairs are
+rejected without regard to pair order. Molecular connectivity joins only each
+Drude-parent pair; orientation helpers and screened pairs add no bonds. Virtual
+sites add their usual connectivity independently.
+
+Updates copy charges, polarizabilities, anisotropy factors and Thole factors.
+Particle indices, orientation indices, screened-pair identities and both counts
+must remain fixed. The periodic flag remains captured. Rust validates topology
+before copying numeric values, so a rejected topology update leaves the Context
+unchanged. Degenerate axes and coincident screened particles raise an error
+instead of returning the source's nonfinite forces.
+
+The supplied Drude implementation reads the owner's force group on every force
+query. Rust therefore shares the group with the original root definition while
+capturing its numeric parameters. Ordinary clones and nested force definitions
+have independent group state. Contexts detect live root group changes before
+reusing CustomIntegrator force/energy caches; a source probe checks the next
+step without changing coordinates. Python System ownership and definition snapshots
+use the same rules as the other force wrappers.
+
+### Drude serialization boundary in collective variables
+
+The supplied `DrudeForceProxy` writes a version-1 XML representation without the
+periodic flag. Deserialization therefore resets it to false. `CustomCVForce`
+creates its internal force by XML cloning, so an originally periodic Drude force
+becomes nonperiodic inside that Context. The public outer CV can still report
+periodic use from its original definition.
+
+Rust follows this implementation behavior. An inner-context preparation hook
+applies the dropped flag recursively, while the outer CV retains its declared
+periodicity. Direct Drude forces retain their requested periodic behavior.
+The reference fixture records an explicit original/serialized/inner flag probe,
+and a Rust test checks the boundary through two nested CVs. This is not inferred
+from a tolerance or hidden by excluding periodic configurations.
+
+### Drude force validation
+
+The reference fixture compares 1,024 states and 76,800 scalar values across eight
+anisotropy/charge configurations, two periodic modes, two initial cell shapes,
+direct or CV use, four update/trajectory phases and four group selections. It
+includes massless orientation helpers, a virtual site used by an axis, partial
+axis definitions, a zero Drude charge, numeric updates, a captured periodic flag,
+a live root group change, shifted periodic images and five Verlet steps.
+Maximum energy and force differences are 1.19e-13 kJ/mol and
+3.96e-12 kJ/mol/nm. The maximum velocity difference after these very small steps
+is 1.04e-9 nm/ps. Another 1,344 force components agree with finite differences
+of the source energy to 4.86e-9 kJ/mol/nm.
+
+Four six-particle systems combine two Drude oscillators, a screened pair and
+harmonic restraints between ordinary particles. They cover isotropic/anisotropic
+springs and periodic/nonperiodic screening. Each runs 50,000 Verlet steps at
+0.0001 ps, for 5 ps. Maximum total-energy variation is 6.50e-6 kJ/mol in both
+implementations, and Drude-parent distances remain below 0.02450 nm. Final
+positions and velocities differ by at most 3.98e-10 nm and 3.23e-10 nm/ps.
+These tests check conservative propagation, not thermalized polarizable molecular
+sampling or resident GPU execution.
+
+### Drude force performance
+
+`scripts/benchmark-drude.sh` measures force/energy queries with half the particles
+as Drude oscillators and half as parents. Parents lie on a jittered 0.32 nm lattice;
+Drude displacements are `(0.01,-0.015,0.012)` nm. Model 0 is isotropic and model 1
+uses two axes from nearby parents with anisotropy factors 0.7 and 1.2. Consecutive
+dipoles have screened interactions. Each model is measured with and without
+periodic screening. Source and Rust use identical varying charges,
+polarizabilities and Thole factors.
+
+Each condition has one warmup and 1,000/64/8 timed queries for
+512/8,192/65,536 particles, with three processes. Every final energy and squared
+force norm is compared. Timing excludes construction; peak RSS includes force
+definitions, Context state and workspace. The comparison is with Reference on
+CPU and does not measure dedicated Drude integration or optimized CPU/GPU kernels.
+
+| Model | Screening | Particles | Reference queries/s | Rust queries/s | Ratio | Reference / Rust peak RSS (MiB) |
+|---|---|---:|---:|---:|---:|---:|
+| Isotropic | Nonperiodic | 512 | 20,671.8 | 24,781.5 | 1.20 | 7.25 / 4.17 |
+| Isotropic | Nonperiodic | 8,192 | 1,228.1 | 1,837.2 | 1.50 | 9.25 / 6.57 |
+| Isotropic | Nonperiodic | 65,536 | 152.1 | 228.8 | 1.50 | 26.96 / 24.48 |
+| Isotropic | Periodic | 512 | 11,663.7 | 16,254.4 | 1.39 | 7.32 / 4.18 |
+| Isotropic | Periodic | 8,192 | 708.7 | 1,355.3 | 1.91 | 9.33 / 6.58 |
+| Isotropic | Periodic | 65,536 | 88.3 | 170.3 | 1.93 | 26.84 / 24.49 |
+| Anisotropic | Nonperiodic | 512 | 17,557.7 | 19,846.8 | 1.13 | 7.25 / 4.20 |
+| Anisotropic | Nonperiodic | 8,192 | 1,034.7 | 1,335.8 | 1.29 | 9.47 / 6.56 |
+| Anisotropic | Nonperiodic | 65,536 | 130.7 | 167.5 | 1.28 | 26.66 / 24.40 |
+| Anisotropic | Periodic | 512 | 10,605.3 | 16,089.5 | 1.52 | 7.33 / 4.17 |
+| Anisotropic | Periodic | 8,192 | 646.9 | 1,064.3 | 1.65 | 9.23 / 6.41 |
+| Anisotropic | Periodic | 65,536 | 80.5 | 133.8 | 1.66 | 26.71 / 24.41 |
+
+Across these conditions, Rust throughput is 1.13--1.93 times the
+Reference throughput, while peak process RSS is 8.5--43.1% lower.
+These measurements do not establish performance for full polarizable systems.
+
 ## Documentation discrepancies found during implementation
 
 - All four Monte Carlo barostat constructor comments call the rigid scaling center a
@@ -2206,6 +2332,14 @@ cover moving electrodes or large dense electrode clusters.
   preserves that additional stopping condition.
 - The `setChargeConstraintTarget()` comment says "Get" although the method sets
   the target. The getter and setter use the same total-system-charge convention.
+
+- `DrudeForce` supports periodic screened interactions, but its version-1 XML
+  proxy omits the periodic flag. XML clones, including CV inner forces, therefore
+  use nonperiodic screening. Rust preserves that measured implementation boundary.
+- The repository's broad instruction to use minimum images for pair distances
+  does not apply to Drude springs or anisotropy axes. The reference header and
+  kernel explicitly use raw coordinates for these terms; the guide now states
+  that distinction.
 
 Implementation and reference tests take precedence over outdated descriptions.
 
