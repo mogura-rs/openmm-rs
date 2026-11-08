@@ -62,7 +62,7 @@ pub trait Integrator<B: Backend>: Send + Sync {
         constraints: &ConstraintSolver,
     ) -> Result<(), ConstraintError>
     where
-        B: Backend<FloatElem = f32>,
+        B: Backend,
     {
         if constraints.is_empty() {
             self.step(positions, velocities, forces, masses);
@@ -72,7 +72,7 @@ pub trait Integrator<B: Backend>: Send + Sync {
         self.step(positions, velocities, forces, masses);
         let proposed = positions.clone();
         constraints.apply_positions(&previous, positions, self.constraint_tolerance())?;
-        *velocities = velocities.clone() + (positions.clone() - proposed) / self.step_size() as f32;
+        *velocities = velocities.clone() + (positions.clone() - proposed) / self.step_size();
         Ok(())
     }
 

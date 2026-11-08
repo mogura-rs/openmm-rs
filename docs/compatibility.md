@@ -44,14 +44,16 @@ revision in generated validation results.
 
 | Area | State | Outstanding work |
 | --- | --- | --- |
-| Core state and parameters | Partial | Force groups, integration masks and state filtering are implemented; checkpointing and broader validation remain |
+| Core state and parameters | Partial | Force groups, integration masks, state filtering, molecular connectivity and molecule-preserving periodic wrapping are implemented; checkpointing and broader validation remain |
 | Virtual sites | Partial | Five site types, nested dependencies and force redistribution are implemented; see the fractional symmetry exception below |
 | Bonded forces | Partial | Reference coverage, CMAP, GPU execution |
 | Nonbonded | Partial | Six methods, particle/exception offsets, runtime updates, reciprocal groups, switching and dispersion correction are implemented; complete API behavior and broader coverage remain |
 | Constraints | Partial | Sparse SHAKE/RATTLE positions and velocities are implemented; specialized solvers and broader reference coverage remain |
 | Custom forces | Partial | Five force types and a scalar expression evaluator exist; broader API and numerical validation remain |
 | Integrators | Partial | Verlet, LFMiddle and Brownian have constrained/unconstrained reference comparisons; other integrators and wider statistical validation remain |
+| Minimization | Partial | L-BFGS with strong-Wolfe search, constraint penalties/projection, fixed particles, virtual sites, integration masks and a Rust reporter are implemented; Python reporters and broader molecular validation remain |
 | Python | Partial | Thin CPU wrappers exist, but the interface is not yet OpenMM-compatible |
+| Precision | Partial | CPU core supports f32 and f64; Python uses f64. GPU precision modes remain unverified |
 | GPU | Unverified | Backend features exist; force implementations currently copy positions to the host |
 | Performance | In progress | Finite-cutoff pairs use reusable cell storage, PME reuses FFT plans/workspace, and dispersion uses linear-time moments; force tensors still allocate and transfer host data |
 
@@ -59,7 +61,8 @@ revision in generated validation results.
 runs C++ fixtures against the Rust Python extension. Current fixtures cover seven
 integrator configurations at four time points, forty-one nonbonded configurations,
 seven virtual site configurations at three time points, fifteen bonded/custom
-force configurations, and 120 group/integration configurations.
+force configurations, 120 group/integration configurations, three molecular
+wrapping configurations and six minimization configurations.
 Nonbonded fixtures include Ewald, electrostatic/dispersion PME, neutral and charged
 systems, exceptions, runtime offsets, parameter updates and periodic box changes.
 Mesh parameters are fixed when a Context is initialized, as in the reference.
@@ -68,6 +71,22 @@ for the analytical dispersion coefficient. Runtime offsets affect pair and
 reciprocal terms but do not recompute that coefficient; parameter updates do.
 Group fixtures compare masks including the high bit, direct/reciprocal splitting,
 disabled direct-space terms, restricted integration, forces and kinetic energy.
+Molecular connectivity follows explicit bond forces, constraints and virtual site
+dependencies. Angles, torsions and nonbonded exceptions do not independently join
+molecules in the supplied reference implementation.
+The minimizer returns its stopping reason, iteration count, physical force RMS
+and constraint error. A constrained stationary point can have nonzero physical
+forces, so that RMS alone is not a constrained convergence criterion. Finite
+precision can end a line search before the requested gradient tolerance is reached.
+For double-precision Rust input, use `openmm_core::tensor::from_floats` or explicit
+`TensorData` with f64 storage. Burn 0.20.1's `Tensor::from_floats` converts input
+through f32 regardless of the backend type; the crate helper preserves the selected
+backend precision. Existing f32 backend code remains supported.
+
+Pass fixture names to select a focused reference run, for example
+`scripts/validate-reference.sh virtual_sites minimizer`. With no arguments, the
+script runs all fixtures. Minimized endpoints are compared after convergence;
+the iteration-limited fixture separately verifies stopping after one iteration.
 Use `scripts/benchmark-cpu.sh` after reference validation to compare exhaustive
 and cell traversal with the OpenMM Reference platform. It records process peak
 RSS and timing; optimized OpenMM CPU/GPU performance is a separate requirement.
@@ -115,14 +134,15 @@ Implementation and reference tests take precedence over outdated descriptions.
 ## Fractional symmetry force exception
 
 For a triclinic box, the supplied reference snapshot's fractional `SymmetrySite`
-force redistribution differs from the negative energy gradient. The default Rust
+force redistribution differs from the negative energy gradient. The Rust
 implementation uses the Jacobian transpose of the position transformation and
 is checked against finite differences of the reference energy.
 
-`Context::set_reference_symmetry_forces(true)` (also available in Python) enables
-the reference snapshot's force convention for explicit regression compatibility.
-That option can produce nonconservative forces for fractional rotations in
-triclinic boxes. Cartesian symmetry sites and the other site types are unaffected.
+Only the conservative force is implemented. This is an intentional compatibility
+exception: the snapshot's fractional-symmetry force and trajectories are not
+reproduced. Reference energies and positions are compared at matching configurations,
+and finite differences of the reference energy validate the redistributed force.
+Cartesian symmetry sites and the other site types are unaffected.
 
 The `SymmetrySite` formulas in the reference header also repeat the x-coordinate
 label and contain index typos in the y/z rows. Position evaluation follows the

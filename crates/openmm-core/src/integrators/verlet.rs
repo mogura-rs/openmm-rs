@@ -70,7 +70,7 @@ impl<B: Backend> Integrator<B> for VerletIntegrator {
         forces: &Tensor<B, 2>,
         masses: &Tensor<B, 1>,
     ) {
-        let dt = self.dt as f32;
+        let dt = self.dt;
 
         // a = F / m,  where masses are [N] and forces/velocities are [N, 3].
         // Expand masses to [N, 1] for broadcasting.

@@ -19,7 +19,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
-type B = NdArray;
+type B = NdArray<f64>;
 type Device = <B as Backend>::Device;
 type Vec3 = (f64, f64, f64);
 type TorsionParticles = (usize, usize, usize, usize);
@@ -47,17 +47,14 @@ fn vec3_list_to_box_vectors(vectors: &[Vec3]) -> PyResult<[[f64; 3]; 3]> {
 }
 
 fn to_tensor3(data: &[Vec3], device: &Device) -> Tensor<B, 2> {
-    let flat: Vec<f32> = data
-        .iter()
-        .flat_map(|&(x, y, z)| [x as f32, y as f32, z as f32])
-        .collect();
-    Tensor::<B, 1>::from_floats(flat.as_slice(), device).reshape([data.len(), 3])
+    let flat: Vec<f64> = data.iter().flat_map(|&(x, y, z)| [x, y, z]).collect();
+    openmm_core::tensor::from_floats::<B, 1>(flat.as_slice(), device).reshape([data.len(), 3])
 }
 
 fn tensor_to_vec3(tensor: &Tensor<B, 2>) -> Vec<Vec3> {
-    let data = tensor.clone().to_data().to_vec::<f32>().unwrap();
+    let data = tensor.clone().to_data().to_vec::<f64>().unwrap();
     data.chunks_exact(3)
-        .map(|chunk| (chunk[0] as f64, chunk[1] as f64, chunk[2] as f64))
+        .map(|chunk| (chunk[0], chunk[1], chunk[2]))
         .collect()
 }
 
@@ -1844,15 +1841,59 @@ struct PyContext {
     inner: Context<B>,
 }
 
+#[pyclass(name = "MinimizationResult", get_all)]
+struct PyMinimizationResult {
+    iterations: usize,
+    energy: f64,
+    force_rms: f64,
+    max_constraint_error: f64,
+    termination: String,
+}
+
+#[pyclass(name = "LocalEnergyMinimizer")]
+struct PyLocalEnergyMinimizer;
+
+#[pymethods]
+impl PyLocalEnergyMinimizer {
+    #[staticmethod]
+    #[pyo3(signature = (context, tolerance=10.0, max_iterations=0))]
+    fn minimize(
+        mut context: PyRefMut<'_, PyContext>,
+        tolerance: f64,
+        max_iterations: usize,
+    ) -> PyResult<()> {
+        openmm_core::LocalEnergyMinimizer::minimize(&mut context.inner, tolerance, max_iterations)
+            .map_err(|error| err(&error.to_string()))?;
+        Ok(())
+    }
+}
+
 #[pymethods]
 impl PyContext {
+    #[pyo3(signature = (tolerance=10.0, max_iterations=0))]
+    fn minimize(
+        &mut self,
+        tolerance: f64,
+        max_iterations: usize,
+    ) -> PyResult<PyMinimizationResult> {
+        let result =
+            openmm_core::LocalEnergyMinimizer::minimize(&mut self.inner, tolerance, max_iterations)
+                .map_err(|error| err(&error.to_string()))?;
+        Ok(PyMinimizationResult {
+            iterations: result.iterations,
+            energy: result.energy,
+            force_rms: result.force_rms,
+            max_constraint_error: result.max_constraint_error,
+            termination: format!("{:?}", result.termination),
+        })
+    }
+    fn get_molecules(&self) -> Vec<Vec<usize>> {
+        self.inner.molecules().to_vec()
+    }
     fn compute_virtual_sites(&mut self) {
         self.inner.compute_virtual_sites();
     }
 
-    fn set_reference_symmetry_forces(&mut self, enabled: bool) {
-        self.inner.set_reference_symmetry_forces(enabled);
-    }
     fn apply_constraints(&mut self, tolerance: f64) -> PyResult<()> {
         self.inner
             .apply_constraints(tolerance)
@@ -2005,7 +2046,7 @@ impl PyContext {
             .map_err(|error| err(&error.to_string()))
     }
 
-    #[pyo3(signature = (positions=false, velocities=false, forces=false, energy=false, parameters=false, parameter_derivatives=false, groups=-1))]
+    #[pyo3(signature = (positions=false, velocities=false, forces=false, energy=false, parameters=false, parameter_derivatives=false, groups=-1, enforce_periodic_box=false))]
     #[allow(clippy::too_many_arguments)]
     fn get_state(
         &self,
@@ -2016,8 +2057,9 @@ impl PyContext {
         parameters: bool,
         parameter_derivatives: bool,
         groups: i64,
+        enforce_periodic_box: bool,
     ) -> PyResult<PyState> {
-        Ok(PyState::from_core(self.inner.get_state_groups(
+        Ok(PyState::from_core(self.inner.get_state_options(
             StateFlags {
                 positions,
                 velocities,
@@ -2027,12 +2069,15 @@ impl PyContext {
                 parameter_derivatives,
             },
             group_mask(groups)?,
+            enforce_periodic_box,
         )))
     }
 }
 
 #[pymodule]
 fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyLocalEnergyMinimizer>()?;
+    m.add_class::<PyMinimizationResult>()?;
     virtual_sites::register(m)?;
     m.add_class::<PyState>()?;
     m.add_class::<PyVerletIntegrator>()?;

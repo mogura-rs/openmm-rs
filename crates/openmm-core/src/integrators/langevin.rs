@@ -100,7 +100,7 @@ impl<B: Backend> Integrator<B> for LangevinMiddleIntegrator {
         forces: &Tensor<B, 2>,
         masses: &Tensor<B, 1>,
     ) {
-        let dt = self.dt as f32;
+        let dt = self.dt;
         let half_dt = dt * 0.5;
         let n = masses.dims()[0];
         let device = masses.device();
@@ -114,10 +114,10 @@ impl<B: Backend> Integrator<B> for LangevinMiddleIntegrator {
         *positions =
             positions.clone() + (velocities.clone() * half_dt).mask_fill(fixed.clone(), 0.0);
 
-        let a = (-self.friction * self.dt).exp() as f32;
-        let kt = (BOLTZMANN * self.temperature) as f32;
+        let a = (-self.friction * self.dt).exp();
+        let kt = BOLTZMANN * self.temperature;
 
-        let variance = -(-2.0 * self.friction * self.dt).exp_m1() as f32;
+        let variance = -(-2.0 * self.friction * self.dt).exp_m1();
         let b_per_particle = (inv_mass * kt * variance).sqrt();
 
         let noise = gaussian_noise::<B>([n, 3], &device);
@@ -144,13 +144,13 @@ impl<B: Backend> Integrator<B> for LangevinMiddleIntegrator {
         constraints: &ConstraintSolver,
     ) -> Result<(), ConstraintError>
     where
-        B: Backend<FloatElem = f32>,
+        B: Backend,
     {
         if constraints.is_empty() {
             self.step(positions, velocities, forces, masses);
             return Ok(());
         }
-        let dt = self.dt as f32;
+        let dt = self.dt;
         let fixed = fixed_particles(masses);
         let inverse_masses = inverse_masses(masses);
         let previous = positions.clone();
@@ -158,9 +158,8 @@ impl<B: Backend> Integrator<B> for LangevinMiddleIntegrator {
         constraints.apply_velocities(positions, velocities, self.constraint_tolerance)?;
         *positions =
             positions.clone() + (velocities.clone() * (0.5 * dt)).mask_fill(fixed.clone(), 0.0);
-        let decay = (-self.friction * self.dt).exp() as f32;
-        let variance =
-            (BOLTZMANN * self.temperature * -(-2.0 * self.friction * self.dt).exp_m1()) as f32;
+        let decay = (-self.friction * self.dt).exp();
+        let variance = BOLTZMANN * self.temperature * -(-2.0 * self.friction * self.dt).exp_m1();
         let noise = gaussian_noise::<B>(positions.dims(), &masses.device());
         *velocities = (velocities.clone() * decay + noise * (inverse_masses * variance).sqrt())
             .mask_where(fixed.clone(), velocities.clone());

@@ -106,6 +106,10 @@ pub trait Force<B: Backend>: Send + Sync + AsAny + ForceClone<B> {
         "Force"
     }
 
+    fn bonded_particles(&self) -> Vec<(usize, usize)> {
+        Vec::new()
+    }
+
     fn calc_forces_and_energy_groups(
         &self,
         positions: &Tensor<B, 2>,

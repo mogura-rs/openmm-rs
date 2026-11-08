@@ -97,6 +97,49 @@ impl<B: Backend> System<B> {
         self.particles.iter().map(|p| p.mass).collect()
     }
 
+    pub fn molecules(&self) -> Vec<Vec<usize>> {
+        let mut parents: Vec<usize> = (0..self.num_particles()).collect();
+        fn root(parents: &mut [usize], mut particle: usize) -> usize {
+            while parents[particle] != particle {
+                parents[particle] = parents[parents[particle]];
+                particle = parents[particle];
+            }
+            particle
+        }
+        let mut join = |a: usize, b: usize| {
+            assert!(
+                a < parents.len() && b < parents.len(),
+                "bonded particle index out of range"
+            );
+            let a = root(&mut parents, a);
+            let b = root(&mut parents, b);
+            parents[a.max(b)] = a.min(b);
+        };
+        for constraint in &self.constraints {
+            join(constraint.particle1, constraint.particle2);
+        }
+        for force in &self.forces {
+            for (a, b) in force.bonded_particles() {
+                join(a, b);
+            }
+        }
+        for (i, site) in self.virtual_sites.iter().enumerate() {
+            if let Some(site) = site {
+                for &particle in site.particles() {
+                    join(i, particle);
+                }
+            }
+        }
+        let mut groups = vec![Vec::new(); parents.len()];
+        for i in 0..parents.len() {
+            groups[root(&mut parents, i)].push(i);
+        }
+        groups
+            .into_iter()
+            .filter(|group| !group.is_empty())
+            .collect()
+    }
+
     pub fn set_particle_mass(&mut self, index: usize, mass: f64) {
         assert!(
             mass.is_finite() && mass >= 0.0,
@@ -179,7 +222,7 @@ impl<B: Backend> System<B> {
     }
 }
 
-impl<B: Backend<FloatElem = f32>> System<B> {
+impl<B: Backend> System<B> {
     pub fn create_context(
         &self,
         integrator: Box<dyn Integrator<B>>,

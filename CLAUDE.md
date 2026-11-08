@@ -80,7 +80,7 @@ struct Context<B: Backend> { ... }     // owns positions/velocities tensors
 struct State<B: Backend> { ... }       // immutable snapshot
 ```
 
-The Python binding layer (`openmm-py`) fixes the backend to `NdArrayBackend` — this is the only place where `B` is concrete. New backends (WGPU, CUDA) are enabled via Cargo features in `openmm-core`:
+The Python binding layer (`openmm-py`) fixes the backend to `NdArray<f64>` — this is the only place where `B` is concrete. The CPU core also supports `NdArray<f32>`. Use `openmm_core::tensor::from_floats` to preserve the selected backend precision when constructing tensors. New backends (WGPU, CUDA) are enabled via Cargo features in `openmm-core`:
 
 ```toml
 # openmm-core/Cargo.toml features
@@ -154,7 +154,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 
 ### Next
 1. Complete the compatibility checklist in `docs/compatibility.md`.
-2. Add pressure control and minimization, and broaden numerical coverage.
+2. Add pressure control, complete custom expressions, and broaden numerical coverage.
 3. Extend custom expressions/forces, integrators and Python API compatibility.
 4. Implement resident GPU force evaluation and validate through Slurm.
 5. Measure and optimize throughput and peak host/device memory without weakening numerical validation.

@@ -43,24 +43,6 @@ void run(const std::string& name) {
     Context context(system,integrator,Platform::getPlatformByName("Reference"));
     context.setPositions(positions);
     context.computeVirtualSites();
-    Vec3 initialGradientForce;
-    if (name == "fractional") {
-        for (int axis=0;axis<3;++axis) {
-            auto plus = positions;
-            auto minus = positions;
-            plus[0][axis] += 1e-6;
-            minus[0][axis] -= 1e-6;
-            context.setPositions(plus);
-            context.computeVirtualSites();
-            double ep = context.getState(State::Energy).getPotentialEnergy();
-            context.setPositions(minus);
-            context.computeVirtualSites();
-            double em = context.getState(State::Energy).getPotentialEnergy();
-            initialGradientForce[axis] = -(ep-em)/2e-6;
-        }
-        context.setPositions(positions);
-        context.computeVirtualSites();
-    }
     int previous=0;
     for (int step : {0,1,10}) {
         if (step > previous) integrator.step(step-previous);
@@ -70,8 +52,24 @@ void run(const std::string& name) {
         vectors(state.getPositions());
         std::cout << ",\"forces\":";
         vectors(state.getForces());
-        if (name == "fractional" && step == 0) {
-            std::cout << ",\"initial_energy_gradient_force\":[" << initialGradientForce[0] << ',' << initialGradientForce[1] << ',' << initialGradientForce[2] << ']';
+        if (name == "fractional") {
+            Vec3 gradientForce;
+            for (int axis=0;axis<3;++axis) {
+                auto plus = state.getPositions();
+                auto minus = plus;
+                plus[0][axis] += 1e-6;
+                minus[0][axis] -= 1e-6;
+                context.setPositions(plus);
+                context.computeVirtualSites();
+                double ep = context.getState(State::Energy).getPotentialEnergy();
+                context.setPositions(minus);
+                context.computeVirtualSites();
+                double em = context.getState(State::Energy).getPotentialEnergy();
+                gradientForce[axis] = -(ep-em)/2e-6;
+            }
+            context.setPositions(state.getPositions());
+            context.computeVirtualSites();
+            std::cout << ",\"energy_gradient_force\":[" << gradientForce[0] << ',' << gradientForce[1] << ',' << gradientForce[2] << ']';
         }
         std::cout << "}\n";
     }

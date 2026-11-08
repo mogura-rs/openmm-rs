@@ -98,19 +98,19 @@ impl<B: Backend> Integrator<B> for BrownianIntegrator {
         forces: &Tensor<B, 2>,
         masses: &Tensor<B, 1>,
     ) {
-        let dt = self.dt as f32;
+        let dt = self.dt;
         let n = masses.dims()[0];
         let device = masses.device();
 
         // Mobility = 1 / (m * gamma)
-        let mobility = inverse_masses(masses) / self.friction as f32;
+        let mobility = inverse_masses(masses) / self.friction;
 
         // Drift term: F / (m*gamma) * dt
         let drift = forces.clone() * mobility.clone() * dt;
 
         // Diffusion term: sqrt(2*kT*dt/(m*gamma)) * noise
         let kt = BOLTZMANN * self.temperature;
-        let diff_scale = (mobility * (2.0 * kt as f32 * dt)).sqrt();
+        let diff_scale = (mobility * (2.0 * kt * dt)).sqrt();
 
         let noise = gaussian_noise::<B>([n, 3], &device);
         let diffusion = noise * diff_scale;

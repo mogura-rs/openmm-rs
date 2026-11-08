@@ -139,7 +139,6 @@ impl VirtualSite {
         forces: &mut [Vector],
         force: Vector,
         box_vectors: Option<&[[f64; 3]; 3]>,
-        reference_symmetry_forces: bool,
     ) {
         match self {
             Self::TwoParticleAverage { particles, weights } => {
@@ -195,13 +194,7 @@ impl VirtualSite {
             } => {
                 let (transform, _) =
                     symmetry_transform(rotation, offset, *use_box_vectors, box_vectors);
-                if reference_symmetry_forces && *use_box_vectors {
-                    let basis = matrix(box_vectors.unwrap()).transpose();
-                    forces[*particle] +=
-                        basis.try_inverse().unwrap() * matrix(rotation).transpose() * basis * force;
-                } else {
-                    forces[*particle] += transform.transpose() * force;
-                }
+                forces[*particle] += transform.transpose() * force;
             }
         }
     }
@@ -266,7 +259,6 @@ fn symmetry_transform(
 
 pub(crate) struct VirtualSitePlan {
     order: Vec<usize>,
-    reference_symmetry_forces: bool,
 }
 
 impl VirtualSitePlan {
@@ -311,17 +303,10 @@ impl VirtualSitePlan {
                 }
             }
         }
-        Self {
-            order,
-            reference_symmetry_forces: false,
-        }
+        Self { order }
     }
 
-    pub fn set_reference_symmetry_forces(&mut self, enabled: bool) {
-        self.reference_symmetry_forces = enabled;
-    }
-
-    pub fn compute_positions<B: Backend<FloatElem = f32>>(
+    pub fn compute_positions<B: Backend>(
         &self,
         sites: &[Option<VirtualSite>],
         positions: &mut Tensor<B, 2>,
@@ -337,7 +322,7 @@ impl VirtualSitePlan {
         *positions = write_vectors(&data, &positions.device());
     }
 
-    pub fn distribute_forces<B: Backend<FloatElem = f32>>(
+    pub fn distribute_forces<B: Backend>(
         &self,
         sites: &[Option<VirtualSite>],
         positions: &Tensor<B, 2>,
@@ -351,37 +336,29 @@ impl VirtualSitePlan {
         let mut data = read_vectors(forces);
         for &index in self.order.iter().rev() {
             let force = data[index];
-            sites[index].as_ref().unwrap().distribute(
-                &positions,
-                &mut data,
-                force,
-                box_vectors,
-                self.reference_symmetry_forces,
-            );
+            sites[index]
+                .as_ref()
+                .unwrap()
+                .distribute(&positions, &mut data, force, box_vectors);
         }
         *forces = write_vectors(&data, &forces.device());
     }
 }
 
-fn read_vectors<B: Backend<FloatElem = f32>>(tensor: &Tensor<B, 2>) -> Vec<Vector> {
+fn read_vectors<B: Backend>(tensor: &Tensor<B, 2>) -> Vec<Vector> {
     tensor
         .to_data()
-        .to_vec::<f32>()
+        .convert::<f64>()
+        .to_vec::<f64>()
         .unwrap()
         .chunks_exact(3)
-        .map(|row| Vector::new(row[0] as f64, row[1] as f64, row[2] as f64))
+        .map(|row| Vector::new(row[0], row[1], row[2]))
         .collect()
 }
 
-fn write_vectors<B: Backend<FloatElem = f32>>(
-    values: &[Vector],
-    device: &B::Device,
-) -> Tensor<B, 2> {
-    let data: Vec<f32> = values
-        .iter()
-        .flat_map(|v| v.iter().map(|&x| x as f32))
-        .collect();
-    Tensor::<B, 1>::from_floats(data.as_slice(), device).reshape([values.len(), 3])
+fn write_vectors<B: Backend>(values: &[Vector], device: &B::Device) -> Tensor<B, 2> {
+    let data: Vec<f64> = values.iter().flat_map(|v| v.iter().copied()).collect();
+    crate::tensor::from_floats::<B, 1>(data.as_slice(), device).reshape([values.len(), 3])
 }
 
 #[cfg(test)]
@@ -432,13 +409,7 @@ mod tests {
         for site in sites {
             let position = site.position(&positions, Some(&box_vectors));
             let mut forces = [Vector::zeros(); 3];
-            site.distribute(
-                &positions,
-                &mut forces,
-                -position,
-                Some(&box_vectors),
-                false,
-            );
+            site.distribute(&positions, &mut forces, -position, Some(&box_vectors));
             for particle in 0..3 {
                 for axis in 0..3 {
                     let mut plus = positions;

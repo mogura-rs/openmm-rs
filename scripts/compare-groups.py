@@ -61,7 +61,7 @@ def main():
                 actual += [v for row in getattr(state, name) for v in row]
                 expected += [v for row in fixture[name] for v in row]
             for got, want in zip(actual, expected):
-                assert math.isfinite(got) and math.isclose(got, want, rel_tol=2e-5, abs_tol=1e-5), (method, direct, previous, fixture["groups"], got, want)
+                assert math.isfinite(got) and math.isclose(got, want, rel_tol=1e-8, abs_tol=1e-8), (method, direct, previous, fixture["groups"], got, want)
                 maximum = max(maximum, abs(got-want))
                 comparisons += 1
     print(json.dumps({"status": "passed", "comparisons": comparisons, "max_absolute_error": maximum}, indent=2))

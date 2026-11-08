@@ -34,9 +34,20 @@ pub struct Context<B: Backend> {
     constraints: ConstraintSolver,
     masses: Tensor<B, 1>,
     virtual_sites: VirtualSitePlan,
+    molecules: Vec<Vec<usize>>,
 }
 
-impl<B: Backend<FloatElem = f32>> Context<B> {
+impl<B: Backend> Context<B> {
+    pub fn system(&self) -> &System<B> {
+        &self.system
+    }
+    pub fn integrator(&self) -> &dyn Integrator<B> {
+        self.integrator.as_ref()
+    }
+    pub fn integrator_mut(&mut self) -> &mut dyn Integrator<B> {
+        self.integrator.as_mut()
+    }
+
     pub fn new(
         mut system: System<B>,
         integrator: Box<dyn Integrator<B>>,
@@ -53,10 +64,10 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
         }
         let masses = system.masses();
         let virtual_sites = VirtualSitePlan::new(system.virtual_sites(), &masses);
+        let molecules = system.molecules();
         let constraints = ConstraintSolver::new(system.constraints(), &masses)
             .unwrap_or_else(|error| panic!("{error}"));
-        let masses: Vec<f32> = masses.into_iter().map(|mass| mass as f32).collect();
-        let masses = Tensor::<B, 1>::from_floats(masses.as_slice(), &device);
+        let masses = crate::tensor::from_floats::<B, 1>(masses.as_slice(), &device);
         let mut parameters = HashMap::new();
         for force in system.forces() {
             for (name, value) in force.global_parameters() {
@@ -83,6 +94,7 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
             constraints,
             masses,
             virtual_sites,
+            molecules,
         }
     }
 
@@ -111,18 +123,18 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
         );
         let n = self.system.num_particles();
         let masses = self.system.masses();
-        let scales: Vec<f32> = masses
+        let scales: Vec<f64> = masses
             .iter()
             .map(|&mass| {
                 if mass == 0.0 {
                     0.0
                 } else {
-                    (BOLTZMANN * temperature / mass).sqrt() as f32
+                    (BOLTZMANN * temperature / mass).sqrt()
                 }
             })
             .collect();
         let scale_tensor =
-            Tensor::<B, 1>::from_floats(scales.as_slice(), &self.device).reshape([n, 1]);
+            crate::tensor::from_floats::<B, 1>(scales.as_slice(), &self.device).reshape([n, 1]);
         let noise = Tensor::<B, 2>::random(
             [n, 3],
             burn::tensor::Distribution::Normal(0.0, 1.0),
@@ -133,19 +145,14 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
         let offset = self.integrator.velocity_time_offset();
         if offset != 0.0 {
             let (forces, _) = self.calc_forces_and_energy();
-            let inv_masses: Vec<f32> = masses
+            let inv_masses: Vec<f64> = masses
                 .iter()
-                .map(|&mass| {
-                    if mass == 0.0 {
-                        0.0
-                    } else {
-                        (1.0 / mass) as f32
-                    }
-                })
+                .map(|&mass| if mass == 0.0 { 0.0 } else { 1.0 / mass })
                 .collect();
-            let correction = Tensor::<B, 1>::from_floats(inv_masses.as_slice(), &self.device)
-                .reshape([n, 1])
-                * (offset as f32);
+            let correction =
+                crate::tensor::from_floats::<B, 1>(inv_masses.as_slice(), &self.device)
+                    .reshape([n, 1])
+                    * (offset);
             self.velocities = self.velocities.clone() - forces * correction;
         }
         self.apply_velocity_constraints(1e-5)
@@ -442,12 +449,6 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
         );
     }
 
-    /// Reproduce the reference snapshot's nonconservative fractional symmetry forces.
-    /// The default uses the energy gradient, including for triclinic boxes.
-    pub fn set_reference_symmetry_forces(&mut self, enabled: bool) {
-        self.virtual_sites.set_reference_symmetry_forces(enabled);
-    }
-
     pub fn apply_velocity_constraints(&mut self, tolerance: f64) -> Result<(), ConstraintError> {
         self.constraints
             .apply_velocities(&self.positions, &mut self.velocities, tolerance)
@@ -482,6 +483,19 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
     }
 
     pub fn get_state_groups(&self, flags: StateFlags, groups: u32) -> State<B> {
+        self.get_state_options(flags, groups, false)
+    }
+
+    pub fn molecules(&self) -> &[Vec<usize>] {
+        &self.molecules
+    }
+
+    pub fn get_state_options(
+        &self,
+        flags: StateFlags,
+        groups: u32,
+        enforce_periodic_box: bool,
+    ) -> State<B> {
         let box_vecs = self
             .periodic_box_vectors
             .or_else(|| self.system.default_periodic_box_vectors().copied());
@@ -516,8 +530,8 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
         // Conversion: 1 Da*(nm/ps)^2 = 1 kJ/mol
         let kinetic_energy = if flags.energy {
             let n = self.system.num_particles();
-            let masses: Vec<f32> = self.system.masses().iter().map(|&m| m as f32).collect();
-            let mass_tensor = Tensor::<B, 1>::from_floats(masses.as_slice(), &self.device);
+            let masses = self.system.masses();
+            let mass_tensor = crate::tensor::from_floats::<B, 1>(masses.as_slice(), &self.device);
             let offset = self.integrator.velocity_time_offset();
             let mut velocities = if offset == 0.0 {
                 self.velocities.clone()
@@ -525,7 +539,7 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
                 self.velocities.clone()
                     + forces.as_ref().unwrap().clone()
                         * crate::integrators::inverse_masses(&mass_tensor)
-                        * offset as f32
+                        * offset
             };
             if offset != 0.0 {
                 self.constraints
@@ -538,8 +552,8 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
             }
             let m = mass_tensor.reshape([n, 1]);
             let v2 = velocities.clone() * velocities;
-            let ek: f32 = (m * v2).sum().into_scalar();
-            Some(0.5 * ek as f64)
+            let ek = crate::tensor::scalar((m * v2).sum());
+            Some(0.5 * ek)
         } else {
             None
         };
@@ -550,12 +564,55 @@ impl<B: Backend<FloatElem = f32>> Context<B> {
             parameters: flags.parameters.then(|| self.parameters.clone()),
             energy_parameter_derivatives,
             periodic_box_vectors: self.periodic_box_vectors,
-            positions: flags.positions.then(|| self.positions.clone()),
+            positions: flags.positions.then(|| {
+                if enforce_periodic_box {
+                    self.wrapped_positions()
+                } else {
+                    self.positions.clone()
+                }
+            }),
             velocities: flags.velocities.then(|| self.velocities.clone()),
             forces: if flags.forces { forces } else { None },
             potential_energy: if flags.energy { potential_energy } else { None },
             kinetic_energy,
         }
+    }
+
+    fn wrapped_positions(&self) -> Tensor<B, 2> {
+        let Some(vectors) = self.periodic_box_vectors else {
+            return self.positions.clone();
+        };
+        let mut positions = self
+            .positions
+            .to_data()
+            .convert::<f64>()
+            .to_vec::<f64>()
+            .unwrap();
+        for molecule in &self.molecules {
+            let mut center = [0.0; 3];
+            for &particle in molecule {
+                for axis in 0..3 {
+                    center[axis] += positions[3 * particle + axis];
+                }
+            }
+            for c in &mut center {
+                *c /= molecule.len() as f64;
+            }
+            let mut shift = [0.0; 3];
+            for axis in (0..3).rev() {
+                let cells = ((center[axis] - shift[axis]) / vectors[axis][axis]).floor();
+                for (d, s) in shift.iter_mut().enumerate() {
+                    *s += cells * vectors[axis][d];
+                }
+            }
+            for &particle in molecule {
+                for axis in 0..3 {
+                    positions[3 * particle + axis] -= shift[axis];
+                }
+            }
+        }
+        crate::tensor::from_floats::<B, 1>(positions.as_slice(), &self.device)
+            .reshape([self.system.num_particles(), 3])
     }
 }
 

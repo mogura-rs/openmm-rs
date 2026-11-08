@@ -64,7 +64,7 @@ def compare(om, fixtures):
                 assert len(actual) == len(expected), (name, step, field)
                 for got, want in zip(actual, expected):
                     assert math.isfinite(got), (name, step, field, got)
-                    assert math.isclose(got, want, rel_tol=3e-5, abs_tol=2e-5), (
+                    assert math.isclose(got, want, rel_tol=1e-8, abs_tol=1e-8), (
                         name, step, field, got, want
                     )
                     errors[field] = max(errors.get(field, 0.0), abs(got - want))

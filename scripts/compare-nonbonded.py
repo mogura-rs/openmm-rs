@@ -72,7 +72,7 @@ def main():
         actual = [state.potential_energy] + [v for row in state.forces for v in row]
         expected = [fixture["energy"]] + [v for row in fixture["forces"] for v in row]
         for got, want in zip(actual, expected):
-            assert math.isfinite(got) and math.isclose(got, want, rel_tol=1e-5, abs_tol=1e-5), (name, got, want)
+            assert math.isfinite(got) and math.isclose(got, want, rel_tol=1e-10, abs_tol=1e-10), (name, got, want)
         results.append({"case": name, "energy_absolute_error": abs(actual[0]-expected[0]), "force_max_absolute_error": max(abs(a-b) for a, b in zip(actual[1:], expected[1:]))})
     print(json.dumps({"status": "passed", "comparisons": 13*len(fixtures), "cases": results}, indent=2))
 

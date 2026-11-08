@@ -85,6 +85,13 @@ impl Default for HarmonicBondForce {
 
 impl<B: Backend> Force<B> for HarmonicBondForce {
     super::force_metadata_impl!();
+    fn bonded_particles(&self) -> Vec<(usize, usize)> {
+        self.bonds
+            .iter()
+            .flat_map(|p| [(p.particle1, p.particle2)])
+            .collect()
+    }
+
     fn calc_forces_and_energy(
         &self,
         positions: &Tensor<B, 2>,
@@ -94,11 +101,9 @@ impl<B: Backend> Force<B> for HarmonicBondForce {
         let n = positions.dims()[0];
         let pos: Vec<f64> = positions
             .to_data()
-            .to_vec::<f32>()
-            .unwrap()
-            .into_iter()
-            .map(|v| v as f64)
-            .collect();
+            .convert::<f64>()
+            .to_vec::<f64>()
+            .unwrap();
 
         let mut forces = vec![0.0f64; n * 3];
         let mut energy = 0.0f64;
@@ -132,9 +137,8 @@ impl<B: Backend> Force<B> for HarmonicBondForce {
             }
         }
 
-        let forces_f32: Vec<f32> = forces.iter().map(|&v| v as f32).collect();
         let forces_tensor =
-            Tensor::<B, 1>::from_floats(forces_f32.as_slice(), &device).reshape([n, 3]);
+            crate::tensor::from_floats::<B, 1>(forces.as_slice(), &device).reshape([n, 3]);
 
         (forces_tensor, energy)
     }

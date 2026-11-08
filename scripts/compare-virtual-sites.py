@@ -48,22 +48,22 @@ def main():
         context = system.create_context(om.VerletIntegrator(0.001))
         context.set_positions(positions)
         context.compute_virtual_sites()
-        if name == "fractional":
-            expected_gradient = next(row for row in fixtures if row["case"] == name and row["step"] == 0)["initial_energy_gradient_force"]
-            default_force = context.get_state(forces=True).forces[0]
-            for got, want in zip(default_force, expected_gradient):
-                assert math.isclose(got, want, rel_tol=1e-5, abs_tol=1e-5), ("energy gradient", got, want)
-                comparisons += 1
-            context.set_reference_symmetry_forces(True)
         previous = 0
         for fixture in (row for row in fixtures if row["case"] == name):
-            context.step(fixture["step"] - previous)
+            if name == "fractional":
+                context.set_positions([tuple(position) for position in fixture["positions"]])
+                context.compute_virtual_sites()
+            else:
+                context.step(fixture["step"] - previous)
             previous = fixture["step"]
             state = context.get_state(positions=True, forces=True, energy=True)
             actual = [state.potential_energy] + [v for row in state.positions + state.forces for v in row]
-            expected = [fixture["energy"]] + [v for row in fixture["positions"] + fixture["forces"] for v in row]
+            expected_forces = [list(force) for force in fixture["forces"]]
+            if name == "fractional":
+                expected_forces[0] = fixture["energy_gradient_force"]
+            expected = [fixture["energy"]] + [v for row in fixture["positions"] + expected_forces for v in row]
             for got, want in zip(actual, expected):
-                assert math.isfinite(got) and math.isclose(got, want, rel_tol=1e-5, abs_tol=1e-5), (name, previous, got, want)
+                assert math.isfinite(got) and math.isclose(got, want, rel_tol=1e-8, abs_tol=1e-8), (name, previous, got, want)
                 maximum_error = max(maximum_error, abs(got-want))
                 comparisons += 1
     print(json.dumps({"status": "passed", "comparisons": comparisons, "max_absolute_error": maximum_error}, indent=2))

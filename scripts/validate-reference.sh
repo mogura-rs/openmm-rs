@@ -5,6 +5,16 @@ cd "$(dirname "$0")/.."
 reference_source="${OPENMM_SOURCE:-../openmm}"
 reference_build="target/reference-openmm"
 jobs="${SLURM_CPUS_PER_TASK:-4}"
+fixtures=(integrators nonbonded virtual_sites bonded groups molecules minimizer)
+if [[ $# -gt 0 ]]; then
+    fixtures=("$@")
+fi
+for fixture in "${fixtures[@]}"; do
+    case "$fixture" in
+        integrators|nonbonded|virtual_sites|bonded|groups|molecules|minimizer) ;;
+        *) echo "Unknown reference fixture: $fixture" >&2; exit 2 ;;
+    esac
+done
 mkdir -p validation-results
 
 git -C "$reference_source" rev-parse HEAD > validation-results/reference-revision.txt
@@ -18,7 +28,7 @@ cmake -S "$reference_source" -B "$reference_build" -G "Unix Makefiles" \
     -DOPENMM_BUILD_EXAMPLES=OFF
 cmake --build "$reference_build" --target OpenMM --parallel "$jobs"
 
-for fixture in integrators nonbonded virtual_sites bonded groups; do
+for fixture in "${fixtures[@]}"; do
     "${CXX:-c++}" -std=c++17 -O2 "tests/reference/${fixture}.cpp" \
         -I "$reference_source/openmmapi/include" -I "$reference_source/olla/include" \
         -I "$reference_source/serialization/include" \
@@ -35,24 +45,14 @@ extension="$CARGO_TARGET_DIR/debug/libopenmm.so"
 if [[ "$(uname -s)" == Darwin ]]; then
     extension="$CARGO_TARGET_DIR/debug/libopenmm.dylib"
 fi
-uv run --no-project python scripts/compare-reference.py \
-    --extension "$extension" \
-    --reference validation-results/integrators-reference.jsonl \
-    | tee validation-results/integrators-comparison.json
-uv run --no-project python scripts/compare-nonbonded.py \
-    --extension "$extension" \
-    --reference validation-results/nonbonded-reference.jsonl \
-    | tee validation-results/nonbonded-comparison.json
-
-uv run --no-project python scripts/compare-virtual-sites.py \
-    --extension "$extension" \
-    --reference validation-results/virtual_sites-reference.jsonl \
-    | tee validation-results/virtual_sites-comparison.json
-uv run --no-project python scripts/compare-bonded.py \
-    --extension "$extension" \
-    --reference validation-results/bonded-reference.jsonl \
-    | tee validation-results/bonded-comparison.json
-uv run --no-project python scripts/compare-groups.py \
-    --extension "$extension" \
-    --reference validation-results/groups-reference.jsonl \
-    | tee validation-results/groups-comparison.json
+for fixture in "${fixtures[@]}"; do
+    case "$fixture" in
+        integrators) comparison=reference ;;
+        virtual_sites) comparison=virtual-sites ;;
+        *) comparison="$fixture" ;;
+    esac
+    uv run --no-project python "scripts/compare-${comparison}.py" \
+        --extension "$extension" \
+        --reference "validation-results/${fixture}-reference.jsonl" \
+        | tee "validation-results/${fixture}-comparison.json"
+done

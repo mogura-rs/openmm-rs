@@ -3,13 +3,19 @@ pub mod context;
 pub mod expression;
 pub mod forces;
 pub mod integrators;
+pub mod minimizer;
 pub mod state;
 pub mod system;
+pub mod tensor;
 pub mod units;
 pub mod virtual_sites;
 
 pub use constraints::{Constraint, ConstraintError};
 pub use context::Context;
+pub use minimizer::{
+    LocalEnergyMinimizer, MinimizationError, MinimizationProgress, MinimizationReporter,
+    MinimizationResult, MinimizationTermination,
+};
 pub use state::{State, StateFlags};
 pub use system::System;
 pub use virtual_sites::VirtualSite;

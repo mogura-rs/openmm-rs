@@ -155,7 +155,7 @@ impl ConstraintSolver {
         ))
     }
 
-    fn project<B: Backend<FloatElem = f32>>(
+    fn project<B: Backend>(
         &self,
         reference: &Tensor<B, 2>,
         values: &mut Tensor<B, 2>,
@@ -166,24 +166,18 @@ impl ConstraintSolver {
             return Ok(());
         }
         let read = |tensor: &Tensor<B, 2>| -> Vec<f64> {
-            tensor
-                .to_data()
-                .to_vec::<f32>()
-                .unwrap()
-                .into_iter()
-                .map(f64::from)
-                .collect()
+            tensor.to_data().convert::<f64>().to_vec::<f64>().unwrap()
         };
         let reference = read(reference);
         let mut data = read(values);
         self.solve(&reference, &mut data, velocities, tolerance)?;
-        let data: Vec<f32> = data.into_iter().map(|v| v as f32).collect();
-        *values =
-            Tensor::<B, 1>::from_floats(data.as_slice(), &values.device()).reshape(values.dims());
+
+        *values = crate::tensor::from_floats::<B, 1>(data.as_slice(), &values.device())
+            .reshape(values.dims());
         Ok(())
     }
 
-    pub fn apply_positions<B: Backend<FloatElem = f32>>(
+    pub fn apply_positions<B: Backend>(
         &self,
         reference: &Tensor<B, 2>,
         positions: &mut Tensor<B, 2>,
@@ -192,7 +186,7 @@ impl ConstraintSolver {
         self.project(reference, positions, false, tolerance)
     }
 
-    pub fn apply_velocities<B: Backend<FloatElem = f32>>(
+    pub fn apply_velocities<B: Backend>(
         &self,
         positions: &Tensor<B, 2>,
         velocities: &mut Tensor<B, 2>,
