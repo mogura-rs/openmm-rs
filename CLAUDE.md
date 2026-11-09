@@ -160,6 +160,7 @@ openmm/tests/TestLangevinMiddleIntegrator.h → integrators/langevin.rs  (implem
 - `GBSAOBCForce` — OBC-II solvation, ACE surface energy, cutoff cells, triclinic boxes and live particle updates
 - `DrudeForce` — raw-coordinate anisotropic springs, periodic screened dipoles, captured numeric parameters and live root force groups
 - `ConstantPotentialForce` — periodic PME, Gaussian electrodes, CG and packed-matrix charge solvers, external fields and total-charge constraints
+- `ATMForce` — two-state hybrid energies, coordinate-transformation Jacobians, nested child forces, live root force groups and order-independent parameter derivatives
 - `NonbondedForce` — cutoff/reaction field, Ewald, PME, LJPME, parameter offsets, switching and dispersion correction
 - Virtual sites — averages, out-of-plane, local coordinates, symmetry and nested dependencies
 - Constraints — sparse SHAKE/RATTLE position and velocity projection

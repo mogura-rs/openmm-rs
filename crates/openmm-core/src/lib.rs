@@ -79,3 +79,5 @@ pub use integrators::qtb::QTBIntegrator;
 pub use forces::custom_many::{CustomManyParticleForce, CustomManyParticleMethod, PermutationMode};
 
 pub use forces::constant_potential::{ConstantPotentialForce, ConstantPotentialMethod};
+
+pub use forces::atm::{ATMForce, ATMTransformation};

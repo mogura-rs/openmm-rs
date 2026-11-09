@@ -1,3 +1,5 @@
+mod atm;
+use atm::PyATMForce;
 mod drude;
 use drude::PyDrudeForce;
 mod constant_potential;
@@ -1831,10 +1833,16 @@ fn extract_context_force_snapshot(
     if let Ok(force) = force.extract::<PyRef<'_, PyDrudeForce>>() {
         return Ok(Box::new(force.inner.snapshot_for_context()));
     }
+    if let Ok(atm) = force.extract::<PyRef<'_, PyATMForce>>() {
+        return Ok(Box::new(atm.snapshot(force.py(), true)?));
+    }
     extract_force_snapshot(force)
 }
 
 fn extract_force_snapshot(force: &Bound<'_, PyAny>) -> PyResult<Box<dyn openmm_core::Force<B>>> {
+    if let Ok(atm) = force.extract::<PyRef<'_, PyATMForce>>() {
+        return Ok(Box::new(atm.snapshot(force.py(), false)?));
+    }
     if let Ok(force) = force.extract::<PyRef<'_, PyDrudeForce>>() {
         return Ok(Box::new(force.inner.clone()));
     }
@@ -2123,6 +2131,9 @@ impl PyContext {
         let (alpha, [nx, ny, nz]) = self.inner.borrow().constant_potential_pme_parameters(&path);
         (alpha, nx, ny, nz)
     }
+    fn get_atm_perturbation_energy(&self, path: Vec<usize>) -> (f64, f64, f64) {
+        self.inner.borrow().atm_perturbation_energy_at_path(&path)
+    }
     fn get_collective_variable_values(&self, force_index: usize) -> Vec<f64> {
         self.inner.borrow().collective_variable_values(force_index)
     }
@@ -2142,6 +2153,13 @@ impl PyContext {
         force_index: usize,
         force: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        if let Ok(atm) = force.extract::<PyRef<'_, PyATMForce>>() {
+            self.inner
+                .borrow_mut()
+                .update_force_parameters_at_path(&[force_index], &atm.snapshot(force.py(), false)?)
+                .map_err(|e| err(&e))?;
+            return Ok(());
+        }
         if let Ok(cv) = force.extract::<PyRef<'_, PyCustomCVForce>>() {
             self.inner
                 .borrow_mut()
@@ -2356,6 +2374,7 @@ fn openmm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCustomCVForce>()?;
     constant_potential::register(m)?;
     drude::register(m)?;
+    atm::register(m)?;
     m.add_class::<PyCMMotionRemover>()?;
     m.add_class::<PyAndersenThermostat>()?;
     barostat::register(m)?;

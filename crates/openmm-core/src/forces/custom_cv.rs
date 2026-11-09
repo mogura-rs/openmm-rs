@@ -421,5 +421,6 @@ pub(crate) fn update_force_parameters<B: Backend>(
     update!(crate::ConstantPotentialForce);
     update!(crate::DrudeForce);
     update!(CustomCVForce<B>);
+    update!(crate::ATMForce<B>);
     Err("this force does not support parameter updates".to_owned())
 }

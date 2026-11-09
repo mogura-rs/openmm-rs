@@ -1,6 +1,7 @@
 pub mod alignment;
 pub mod andersen;
 pub mod anisotropic_barostat;
+pub mod atm;
 pub mod barostat;
 pub mod cm_motion;
 pub mod cmap_torsion;

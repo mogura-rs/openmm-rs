@@ -53,6 +53,7 @@ revision in generated validation results.
 | Implicit solvation | Partial | GBSA-OBC and programmable CustomGB support polar/surface forces, three cutoff methods, particle updates, cell traversal and nested CV use; application parameter assignment and resident GPU execution remain |
 | Anisotropic particles | Partial | Gay-Berne energies, conservative orientation forces, exceptions and live updates are implemented; source-force exceptions are explicit; resident GPU execution remains |
 | Drude polarization | Partial | Anisotropic springs, screened dipoles, numeric updates, live root groups and Reference comparisons are implemented; dedicated integrators, application preparation and resident GPU execution remain |
+| Alchemical transfer | Partial | ATM hybrid energies, fixed and particle-offset transformations, nested child forces, live root groups, transformation updates and Reference comparisons are implemented; molecular preparation and resident GPU execution remain |
 | Conducting electrodes | Partial | Constant-potential PME, CG and packed-matrix charge solvers, external fields, total-charge constraints, parameter updates and CPU comparisons are implemented; molecular preparation and resident GPU execution remain |
 | Surface area | Partial | LCPO overlap energies, analytic forces, periodic distances and parameter updates are implemented; application parameter assignment and resident GPU execution remain |
 | Collective geometry | Partial | RMSD, radius of gyration and orientation restraint use analytic forces; reference/selection updates are implemented for RMSD and orientation restraint |
@@ -2184,6 +2185,136 @@ Across these conditions, Rust throughput is 1.13--1.93 times the
 Reference throughput, while peak process RSS is 8.5--43.1% lower.
 These measurements do not establish performance for full polarizable systems.
 
+## Alchemical transfer forces
+
+`ATMForce` composes arbitrary child forces into the energy of two transformed
+coordinate states. It accepts either a scalar expression in `u0`, `u1` and global
+parameters, or the source's nine-parameter soft-core softplus constructor. The
+Python API includes both naming conventions, the two transformation classes,
+retained child definitions and `getPerturbationEnergy()`, which returns
+`(u1, u0, combined_energy)`. The CPU core supports f64 and f32.
+
+Fixed displacements can differ between the two states. Particle-offset
+transformations use the raw vector from an origin particle to a destination;
+they do not apply a minimum-image operation to that displacement. The child force
+still applies its own periodic geometry. The force on a transformed particle is
+also added to its destination and subtracted from its origin. These additions
+always use the original child force values, which handles swaps, shared sources
+and self references without recursively applying the transformation.
+
+Child forces inherit masses, box vectors and global values. Outer constraints
+and virtual-site definitions are not copied into the two transformed systems,
+matching Reference. Outer virtual-site forces are redistributed after the hybrid
+force and coordinate Jacobians are combined. Child force groups do not select
+terms within ATM: every child contribution is included. Nested ATM and CV forces
+are supported. Child global defaults must agree; the ATM object's own defaults
+then override the inherited values, as in the source.
+
+### Captured definitions and live state
+
+Context creation captures the energy expression, child definitions and default
+parameters. Explicit updates change only particle transformations, including a
+change of transformation type. The number of particles must remain fixed.
+Changing the definition's expression, child parameters or global defaults does
+not change an existing Context. Global Context parameters remain live.
+
+The source ATM implementation reads its owning definition's force group at each
+evaluation. The root Python ATM object therefore shares this live group with its
+Context snapshot. A child inside another ATM or CV is a detached definition
+snapshot, matching source serialization of the inner systems. The force group
+probe moves an existing root force from group 5 to group 6 without a parameter
+update and verifies the corresponding zero/nonzero group queries. Contexts detect
+these live root group changes before reusing CustomIntegrator force/energy caches;
+a Rust test checks `energy0` across group changes without coordinate changes.
+
+The source builds both inner systems from XML clones of the child forces. Rust
+applies the same inner-context preparation hook used by `CustomCVForce`: nested
+definitions receive independent group state, and a periodic `DrudeForce` child
+loses the periodic flag omitted by its XML proxy. The ATM force retains the
+periodicity declared by its original children, while the child barostat check
+uses the prepared inner children.
+
+Energy derivatives differentiate the outer expression at fixed `u0` and `u1`.
+They do not add derivatives of a child energy with respect to a shared parameter.
+This restriction follows the source implementation and is separate from the
+full chain rule used for Cartesian forces. Rust returns every registered
+derivative independently of registration order; the approved source exception is
+described below. Repeated registrations of one name are summed, as in the source.
+
+Both state energies are evaluated even at an endpoint. For a branch whose hybrid
+coefficient has magnitude below the smallest positive normal f32 value, a nonfinite
+state energy is replaced by the largest finite f32 value before the combined
+energy is evaluated. The source's strict coefficient threshold also controls force
+accumulation. An endpoint regression verifies that an inactive singular state does
+not contaminate finite energy or forces from the active state.
+
+### Reusable state storage
+
+Rust evaluates one captured child-force list sequentially at the two coordinate
+states. It retains one transformed-position tensor and two raw force buffers;
+Jacobian contributions are accumulated directly into the caller's output. It does
+not clone two complete Systems or retain two full Contexts. A 4,096-particle test
+with a host-capable one-particle custom child bounds each individual workspace
+allocation by 64 bytes per particle. After warmup, the tensor API allocates one
+returned force buffer, while host accumulation makes no new dense allocation.
+The bound applies to individual allocations, not their sum or process RSS. Child
+forces without host accumulation can still allocate their own force tensors.
+
+### ATM numerical coverage
+
+The reference fixture covers 1,440 states and 96,192 scalar comparisons across
+five hybrid potentials, three coordinate transformations, periodic/nonperiodic
+child interactions, nested ATM, an outer CV, four update/trajectory phases and
+three force-group queries. It includes a fixed particle, an out-of-plane virtual
+site, child bond/nonbonded/RG forces, global-default overrides, changed transforms,
+captured formulas, periodic image changes and short trajectories. Maximum
+potential-energy, force and perturbation-energy errors are 1.71e-13 kJ/mol,
+5.69e-14 kJ/mol/nm and 1.71e-13 kJ/mol. Another 1,800 force components are checked
+against finite differences of the original source energy; the maximum error is
+1.92e-9 kJ/mol/nm. The main fixture registers one energy derivative per ATM
+object. A separate source probe registers `lambda` and `k` alone and in both
+orders; Rust matches the single-registration source values in both orders.
+
+Four six-particle systems run 25,000 Verlet steps at 0.0002 ps, for 5 ps each.
+They combine harmonic distance restraints with either the default soft-core
+potential and fixed shifts, or a nonlinear hybrid potential and coordinate swaps.
+Both periodic and nonperiodic bond geometries are covered. Maximum total-energy
+variation is 2.72e-8 kJ/mol. Final position and velocity differences from Reference
+are below 4.85e-11 nm and 3.58e-11 nm/ps. Final momentum errors are below
+3.56e-15 Da nm/ps in Rust and 2.04e-10 Da nm/ps in Reference. These are small,
+deterministic stability tests; molecular preparation and alchemical sampling
+convergence remain separate acceptance criteria.
+
+### ATM performance
+
+`scripts/benchmark-atm.sh` measures f64 force/energy queries on a jittered 0.32 nm
+lattice. The first model combines a quadratic one-particle custom potential with
+fixed shifts. The second combines periodic nonbonded interactions with coordinate
+swaps, a 0.8 nm cutoff and 0.6 nm switching distance. Both use the default soft-core
+formula with lambda1/lambda2 = 0.2/0.6, alpha = 0.1, uh = w0 = 0, umax = 50,
+ubcore = 1, acore = 0.5 and direction = 1. Each timed query evaluates both states.
+
+Each condition has one warmup, 500/100/20 timed queries for 128/512/2,048 particles,
+and three processes. The table gives median queries/s and the largest process peak
+RSS. Construction is excluded from timing; RSS includes Context storage, force
+workspaces and runtime overhead. Energy and squared force norm are checked for
+every process. This compares synthetic ATM force queries with the Reference
+platform; optimized OpenMM CPU/GPU platforms and free-energy convergence are
+outside this measurement.
+
+| Child and transformation | Particles | Rust queries/s | Reference queries/s | Rust peak KiB | Reference peak KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Quadratic, fixed shifts | 128 | 25510.160 | 8814.656 | 4,964 | 9,264 |
+| Quadratic, fixed shifts | 512 | 6703.955 | 2345.066 | 5,208 | 10,224 |
+| Quadratic, fixed shifts | 2,048 | 1197.961 | 548.082 | 5,624 | 10,236 |
+| Nonbonded, swaps | 128 | 1522.707 | 646.599 | 5,036 | 9,752 |
+| Nonbonded, swaps | 512 | 125.877 | 85.360 | 5,172 | 9,676 |
+| Nonbonded, swaps | 2,048 | 34.056 | 20.881 | 5,908 | 11,788 |
+
+Timing ranges remain in the generated summaries; short runs are sensitive to
+CPU frequency and scheduling. The nonbonded model also includes the performance
+of each implementation's child force, so these ratios do not isolate ATM overhead.
+
 ## Documentation discrepancies found during implementation
 
 - All four Monte Carlo barostat constructor comments call the rigid scaling center a
@@ -2341,6 +2472,16 @@ These measurements do not establish performance for full polarizable systems.
   kernel explicitly use raw coordinates for these terms; the guide now states
   that distinction.
 
+- `ATMForce.h` documents the default soft-core expression with an unmatched
+  `, u)` in the `usc` definition. It also omits the `Lambda2-Lambda1` and `Acore`
+  zero guards that the constructor actually uses. Rust follows the constructor.
+- The header's C++ examples declare `atmforce` but call methods on `atm`, and add a
+  `CustomBondForce` without bonds, so the example child contributes zero energy.
+- The header promises derivatives with respect to global parameters without
+  stating that only the outer expression is differentiated at fixed `u0` and `u1`.
+  A child energy's dependence on a shared parameter is not included. Rust
+  preserves this implementation behavior.
+
 Implementation and reference tests take precedence over outdated descriptions.
 
 ## Fractional symmetry force exception
@@ -2382,6 +2523,18 @@ records both connectivity results explicitly, while forces, energies and ordinar
 trajectories retain numerical comparisons with the reference. One-group bonds do
 not add molecular connectivity. Group connections use a spanning tree to avoid
 materializing a Cartesian product of particle pairs.
+
+## ATM multiple-derivative exception
+
+`ATMForceImpl` appends each compiled derivative expression to a vector and binds
+its variables immediately. When the vector grows, earlier compiled expressions are
+copied without those bindings. With two registered derivatives, the first one
+therefore evaluates to zero: registering only `lambda` gives 6, while registering
+`lambda` and then `k` gives 0 for `lambda`. The result depends on registration
+order. With user approval, Rust returns the correct partial derivative for every
+registration. The ATM reference fixture records the source single and multiple
+registration results, and the comparison checks Rust against the single-registration
+values in both orders.
 
 ## Barostat compatibility exceptions
 
