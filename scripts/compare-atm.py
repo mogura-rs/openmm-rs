@@ -124,10 +124,13 @@ def derivative_checks(om, rows):
     expected = {tuple(row['order']): row['derivatives'] for row in rows}
     single = {name: expected[(name,)][name] for name in ['lambda', 'k']}
     assert math.isclose(single['lambda'], 6, abs_tol=1e-12) and math.isclose(single['k'], 12, abs_tol=1e-12), single
-    source_multiple = {}
+    source_multiple, source_defect = {}, False
     for order in [('lambda', 'k'), ('k', 'lambda')]:
         values = expected[order]
-        assert values[order[0]] == 0 and math.isclose(values[order[1]], single[order[1]], abs_tol=1e-12), (order, values)
+        assert math.isclose(values[order[1]], single[order[1]], abs_tol=1e-12), (order, values)
+        defect = values[order[0]] == 0
+        assert defect or math.isclose(values[order[0]], single[order[0]], abs_tol=1e-12), (order, values)
+        source_defect |= defect
         source_multiple[','.join(order)] = values
         system = om.System(); system.add_particle(12); system.add_particle(12)
         force = om.ATMForce('u0+lambda*(u1-u0)+0.5*k*k*u1')
@@ -142,7 +145,7 @@ def derivative_checks(om, rows):
             assert math.isclose(actual[name], single[name], abs_tol=1e-12), (order, name, actual[name], single[name])
     assert len(rows) == 4
     return {'source_single_registration': single, 'source_multiple_registration': source_multiple,
-            'rust_matches_single_registration_in_both_orders': True}
+            'source_multiple_registration_defect': source_defect, 'rust_matches_single_registration_in_both_orders': True}
 
 
 def stability_checks(om, rows):

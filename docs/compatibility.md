@@ -2534,7 +2534,9 @@ therefore evaluates to zero: registering only `lambda` gives 6, while registerin
 order. With user approval, Rust returns the correct partial derivative for every
 registration. The ATM reference fixture records the source single and multiple
 registration results, and the comparison checks Rust against the single-registration
-values in both orders.
+values in both orders. It also accepts a reference checkout in which this defect is
+corrected by binding the derivative expressions after the vector stops growing, and
+reports whether the reference showed the defect.
 
 ## Barostat compatibility exceptions
 
